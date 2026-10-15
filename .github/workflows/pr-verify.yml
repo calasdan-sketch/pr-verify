@@ -1,0 +1,26 @@
+# PR Verify: deterministic trust for agent-authored PRs.
+# Fails the build when the risk score meets the threshold in .pr-verify.yaml.
+name: pr-verify
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history: blame + diff need it
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pr-verify
+        run: |
+          # vendored: copy this repo's pr_verify/ or pip install when published
+          echo "PYTHONPATH=$GITHUB_WORKSPACE" >> $GITHUB_ENV
+      - name: Verify PR
+        run: >-
+          python -m pr_verify check
+          --base origin/${{ github.base_ref }}
+          --format human

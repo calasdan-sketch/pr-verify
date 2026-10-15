@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pr-verify"
+version = "0.1.0"
+description = "Deterministic trust scoring for agent-authored PRs."
+readme = "README.md"
+requires-python = ">=3.10"
+
+[project.scripts]
+pr-verify = "pr_verify.cli:main"
