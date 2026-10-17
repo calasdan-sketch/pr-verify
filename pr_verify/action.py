@@ -8,7 +8,7 @@ check`, runs the check, prints the report and writes the outputs
 Mapping (input -> env var -> CLI flag), kept in INPUTS so the test suite
 can assert action.yml and the CLI agree:
 
-    base        PR_VERIFY_BASE        --base
+    base        PR_VERIFY_BASE        --base        (empty = auto-detect)
     head        PR_VERIFY_HEAD        --head
     format      PR_VERIFY_FORMAT      --format
     fail-on     PR_VERIFY_FAIL_ON     --fail-on
@@ -87,8 +87,8 @@ def main(argv: list[str] | None = None, environ: dict | None = None) -> int:
         print(f"error: {e}", file=sys.stderr)
         write_outputs({"exit-code": 2}, env.get("GITHUB_OUTPUT"))
         return 2
-    if result is None:
-        print(f"no added lines in {args.base}..{args.head} — nothing to verify")
+    if result.nothing:
+        print(result.nothing_message())
         outputs = {"score": 0, "band": "low", "requires-review": "false",
                    "exit-code": 0}
         write_outputs(outputs, env.get("GITHUB_OUTPUT"))

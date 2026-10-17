@@ -15,23 +15,41 @@ from . import miniyaml
 CONFIG_FILE = ".pr-verify.yaml"
 
 DEFAULTS = {
-    # Substrings matched (case-insensitive) against commit author name/email
-    # and message to classify a commit as agent-authored.
+    # Agent markers, matched on WHOLE WORDS (see markers.py) against the
+    # commit author name and email, Co-Authored-By/Generated-by trailers
+    # and a `marker:` subject prefix -- never against free message text.
+    # A bot-shaped author ("claude-bot", "Claude", "dan (aider)",
+    # "dependabot[bot]") matches on any word; a human-shaped "First Last"
+    # name only matches a marker covering the whole name ("Claude Code"),
+    # so "Claude Dupont", "Cody Smith" and "Tim Abbott" stay human. If your
+    # team has a human called Cody or Claude who commits as a single word,
+    # drop that marker and rely on trailers.
     "agent_markers": [
-        "claude", "codex", "cursor", "copilot", "bot",
-        "co-authored-by: claude", "aider", "cody",
+        "claude", "claude code", "codex", "cursor", "cursor agent",
+        "copilot", "github copilot", "bot", "aider", "cody", "devin",
     ],
-    # Globs (repo-relative) for security-sensitive areas.
+    # Globs (repo-relative) for security-sensitive areas. Matched against
+    # the full path and the bare filename (fnmatch). Word-ish on purpose:
+    # "*auth*" also caught author.py, "*token*" tokenizer.py and "*key*"
+    # monkey.py -- these do not.
     "sensitive_paths": [
-        "**/auth*/**", "**/*auth*.py",
-        "**/crypto*/**", "**/*crypt*.py",
-        "**/payment*/**", "**/billing*/**",
-        "**/migrations/**", "**/migrate/**",
-        "**/*secret*", "**/*password*", "**/*token*", "**/*key*.py",
+        "**/auth/**", "**/auth.*", "**/auth_*", "**/*_auth.*",
+        "**/authn*", "**/authz*", "**/authentication*", "**/authorization*",
+        "**/oauth*", "**/login*",
+        "**/crypto/**", "**/crypto.*", "**/crypt_*", "**/*_crypt.*",
+        "**/encrypt*", "**/decrypt*", "**/cipher*",
+        "**/payment*", "**/billing*",
+        "**/migrations/**", "**/migrate/**", "**/migrate.*",
+        "**/*secret*", "**/*credential*", "**/*password*", "**/*passwd*",
+        "**/*apikey*", "**/*api_key*", "**/*_key.*", "**/*token.*",
+        "**/.env", "**/.env.*",
     ],
-    # Policy gates: commands run from the repo root, WITHOUT a shell
-    # (each command is split with shlex into an argv list). Keep them to
-    # plain executables with arguments — no pipes, redirects, or $VARs.
+    # Policy gates: commands run from the repo root, WITHOUT a shell. A
+    # string is split into an argv list (POSIX rules; Windows rules on
+    # Windows, so C:\paths keep their backslashes) and argv[0] is looked
+    # up with shutil.which (so `npx`/`npm`/`tsc` .cmd shims are found on
+    # Windows); a YAML list is used as the argv as-is. Keep them to plain
+    # executables with arguments — no pipes, redirects, or $VARs.
     "gates": [],
     # "gates": ["python -m pytest -x -q"],
     "risk_threshold": 70,   # score >= this fails (see risk.gate); --min-score overrides
@@ -58,6 +76,17 @@ def _read_base_config(root: str, base: str) -> dict:
 
 _INT_FIELDS = {"risk_threshold": (0, 100), "timeout": (1, None)}
 _LIST_FIELDS = ("agent_markers", "sensitive_paths", "gates")
+
+
+def _as_gate(g) -> str | list[str]:
+    """A gate is a command string or an argv list of strings."""
+    if isinstance(g, list):
+        if not g or not all(isinstance(x, (str, int, float)) for x in g):
+            raise ValueError(
+                f"{CONFIG_FILE}: a gate given as a list must be a non-empty "
+                f"list of strings, got {g!r}")
+        return [str(x) for x in g]
+    return str(g)
 
 
 def _as_int(key: str, val, lo: int | None, hi: int | None) -> int:
@@ -94,20 +123,24 @@ def load(root: str, base: str) -> dict:
     # normalize marker matching inputs
     cfg["agent_markers"] = [str(m).lower() for m in cfg["agent_markers"]]
     cfg["sensitive_paths"] = [str(x) for x in cfg["sensitive_paths"]]
-    cfg["gates"] = [str(g) for g in cfg["gates"]]
+    cfg["gates"] = [_as_gate(g) for g in cfg["gates"]]
     return cfg
 
 
 def example_config() -> str:
     return """# PR Verify config. All fields optional; shown with defaults.
+# This file is read from the BASE ref of the diff (not the worktree), so
+# commit it to your base branch for it to take effect.
 agent_markers:
   - claude
   - codex
   - cursor
   - copilot
   - bot
+  - aider
 sensitive_paths:
-  - "**/auth*/**"
+  - "**/auth/**"
+  - "**/auth.*"
   - "**/migrations/**"
   - "**/*secret*"
 gates:

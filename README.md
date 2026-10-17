@@ -8,40 +8,90 @@ gates pass.
 
 ## Install
 
+Stdlib only, Python 3.10+, needs the `git` command line tool on PATH.
+
 ```bash
-git clone <repo> && cd pr-verify
-pip install .   # provides the `pr-verify` console script
+pip install git+https://github.com/calasdan-sketch/pr-verify
+pr-verify check
 ```
 
-Or run without installing: `python3 -m pr_verify` from the repo root.
+Or run from a checkout without installing: `python3 -m pr_verify` from the
+repo root.
 
 ## Quick start
 
 ```bash
 cd your-repo
-python3 -m pr_verify init        # write an example .pr-verify.yaml
-python3 -m pr_verify check --base main
+pr-verify init            # write an example .pr-verify.yaml (then commit it to your base branch)
+pr-verify check           # base auto-detected: origin/HEAD, then main, master, origin/main, origin/master
+pr-verify check --base origin/main --format json --min-score 60
 ```
+
+The report says which base was used (`base: master  (auto-detected)`); pass
+`--base <ref>` to choose. Without `git` on PATH or outside a repo the tool
+prints a one-line error and exits 2.
 
 ## What it reports
 
 **Provenance** — every added line labeled agent/human via `git blame` +
-commit-author analysis (configurable markers: claude, codex, cursor,
-copilot, bot…). Per file: `agent` / `mixed` / `human`, with the detected
-agent identities.
+commit-author analysis. Per file: `agent` / `mixed` / `human`, with the
+detected identities shown as `author (marker)` — e.g. `[claude-bot
+(claude)]` or `[Dan Calas (aider)]` — so you can see *why* a line counts
+as agent-written.
+
+Markers match on **whole words** where agents actually sign, never on
+prose:
+
+- the author name — a bot-shaped name (one word, or a hyphen/underscore
+  handle: `claude-bot`, `Claude`, `copilot-swe-agent`) matches on any
+  word; a human-shaped "First Last" name only matches a marker covering
+  the whole name (`Claude Code`) or a bracketed/parenthesised tag
+  (`dependabot[bot]`, `Dan Calas (aider)`). So **Tim Abbott, Claude Dupont
+  and Cody Smith are humans**; "bot" matches the word `bot`, not `Abbott`;
+- the author email — whole local part (`cody@…`), a hyphen/underscore word
+  of it (`claude-bot@…`; dots join `first.last` names and are not split),
+  or a domain label (`…@aider.chat`, `…@cursor.com`);
+- `Co-Authored-By:` / `Generated-by:` / `Signed-off-by:` trailers in the
+  body, matched by the same rules (`Co-Authored-By: Claude
+  <noreply@anthropic.com>`);
+- a `marker:` subject prefix (`aider: fix the tests`).
+
+The rest of the subject and the body are not scanned: "Fix cursor jump in
+editor" is a commit about a cursor, not Cursor's commit. Default markers:
+claude, claude code, codex, cursor, cursor agent, copilot, github copilot,
+bot, aider, cody, devin. If a human on your team commits as a single word
+that is also a marker (`Cody`), drop that marker and rely on trailers.
+
+Non-ASCII file names (`app/Καλάς.py`) are files of their own: git is run
+with `core.quotePath=false` and quoted diff headers are unescaped, so
+their hunks are never credited to the previous file.
 
 **Blast radius** — reverse dependency graph: for each changed file, the
 transitive set of in-repo dependents that could break. Python via AST —
 absolute imports, relative imports (`from . import x`, `from ..core import
 y`, resolved against the importing file's own package), `from pkg import
 submodule`, and `src/` layouts (`src/pkg/core.py` answers to `pkg.core`);
-JS/TS/Go/Rust/Java/Ruby/PHP via heuristic fallback.
+JS/TS/Go/Rust/Java/Ruby/PHP via heuristic fallback. A deleted file that
+nothing in the repo still imports is marked `external_only` (JSON) / "not
+in the worktree; nothing in-repo imports it" (report).
 
 **Policy gates** — commands from `.pr-verify.yaml` (tests, typecheck,
 lint), run with timeout, pass/fail captured. The config is read from the
 base ref (never the worktree under review) and gates run **without** a
 shell — `;`, `&&`, `$()`, pipes and the rest are literal arguments, never
-interpreted. A failing gate fails the verification (nonzero exit).
+interpreted. A gate is a command string (split with the platform's rules —
+on Windows `C:\Python311\python.exe -m pytest` keeps its backslashes and
+`npx`/`npm`/`tsc` `.cmd` shims are found through `PATHEXT`) or a YAML list
+used as the argv as-is:
+
+```yaml
+gates:
+  - "python -m pytest -x -q"
+  - ["npx", "tsc", "--noEmit"]
+```
+
+A failing gate fails the verification (exit 1) and the report ends with
+`✗ policy gate failed: <command>` — never a green tick.
 
 **Risk score** — deterministic 0–100 from six public factors:
 
@@ -49,10 +99,20 @@ interpreted. A failing gate fails the verification (nonzero exit).
 |---|---|---|
 | agent_share | 40 | % of added lines agent-authored |
 | blast | 25 | log-scaled transitive dependents |
-| sensitive | 20 | changed files under sensitive globs (auth, crypto, payments, migrations…); deleted files match like touched ones |
+| sensitive | 20 | changed files under sensitive globs (auth, crypto, payments, migrations, secrets…); deleted files match like touched ones |
 | gates | 10 | any policy gate failed |
 | no_tests | 5 | source changed with no test changes |
 | deletion | 50 | agent-attributed deletions: 45 if any deleted file is sensitive, else 10 for deleting tracked files at all, plus log-scaled points for the deleted files' dependents — pure-deletion PRs can trip the threshold too |
+
+Test files are recognised by path component (`tests/`, `test/`,
+`__tests__/`, `spec/`) or filename pattern (`test_*.py`, `*_test.*`,
+`*.test.*`, `*.spec.*`, `*Test.java`, `conftest.py`) — `latest.py` and
+`attestation.py` are source. The default sensitive globs are word-ish on
+purpose (`**/auth.*`, `**/auth/**`, `**/*_key.*`, `**/*token.*`,
+`**/*secret*`, `**/.env*`…): `author.py`, `monkey.py` and `tokenizer.py`
+do not match; `api_key.py`, `auth_token.py` and `.env.local` do. See
+`DEFAULTS` in `config.py` for the full list and override
+`sensitive_paths` in your config.
 
 Bands: 0–29 low · 30–69 medium · 70–100 high — labels only, they never
 decide pass/fail. The formula is documented so teams can argue with it and
@@ -73,6 +133,31 @@ comparison.
 - A failing **policy gate** fails the verification regardless of `--fail-on`
   — the tool cannot vouch for a diff whose tests or lint failed.
 
+## Uncommitted changes and the snapshot
+
+With the default `--head HEAD`, `check` also verifies your uncommitted
+changes to **tracked** files: they are staged into a temporary index and
+written as a synthetic commit so `diff`/`blame` can see them. That commit
+is a dangling object under `.git/objects` — unreachable from any ref,
+never pushed, removed by `git gc` — and your own index is untouched.
+Untracked files are **not** snapshotted by default (an untracked
+`.env.local` with a secret must not land in the object store because
+someone ran a check); the report lists what was skipped, and
+`--include-untracked` opts them in. An explicit `--head <ref>` verifies the
+committed range only.
+
+Uncommitted lines have no commit to blame, so they count as human-written,
+never agent-written.
+
+## The config file
+
+`.pr-verify.yaml` is read **from the base ref**, not from the worktree —
+a hostile PR must not be able to ship its own gate config and get it
+executed. That means a freshly written config does nothing until it is
+committed to your base branch: `init` says so, the report prints a note
+when the worktree copy differs from (or does not exist at) the base, and
+the file itself is excluded from provenance and scoring.
+
 ## CI
 
 ```bash
@@ -82,14 +167,15 @@ python3 -m pr_verify check --base origin/main --format json --min-score 60
 ### GitHub Action
 
 `action.yml` at the repo root is a composite action. Its inputs are the
-`check` flags, same names without the dashes, same defaults:
+`check` flags, same names without the dashes, same defaults. This repo's
+default branch is `master`; pin to it (or to a tag once one exists):
 
 ```yaml
 - uses: actions/checkout@v4
   with: { fetch-depth: 0 }
-- uses: calasdan-sketch/pr-verify@main
+- uses: calasdan-sketch/pr-verify@master
   with:
-    base: origin/main      # --base
+    base: origin/main      # --base (empty = auto-detect; be explicit in CI)
     head: HEAD             # --head
     format: human          # --format human|json
     fail-on: high          # --fail-on high|any-risk|never
@@ -110,14 +196,21 @@ which maps each input to the matching CLI flag — the test suite parses
   PR VERIFY  risk 57/100 (MEDIUM)
 ════════════════════════════════════════════════════════
 
+  base: main  (auto-detected)
+
   provenance: 9/13 added lines agent-authored
-    agent   app/auth.py (4/4 agent) [claude-bot]
-    mixed   app/core.py (4/8 agent) [claude-bot]
-    agent   app/views.py (1/1 agent) [claude-bot]
+    agent   app/auth.py (4/4 agent) [claude-bot (claude)]
+    mixed   app/core.py (4/8 agent) [claude-bot (claude)]
+    agent   app/views.py (1/1 agent) [claude-bot (claude)]
 
   blast radius:
     app/core.py: 1 downstream dependent(s)
       direct: app/views.py
+    app/auth.py: 0 downstream dependent(s)
+    app/views.py: 0 downstream dependent(s)
+
+  gates:
+    none configured
 
   risk factors:
      28 pts  agent_share  9/13 added lines agent-authored (69%)
@@ -125,6 +218,7 @@ which maps each input to the matching CLI flag — the test suite parses
      20 pts  sensitive    sensitive files touched: app/auth.py
       0 pts  gates        no gates configured
       5 pts  no_tests     source changed with no test changes
+      0 pts  deletion     no agent-attributed deletions
 
   ✓ score 57 < min-score 70
 ════════════════════════════════════════════════════════
@@ -133,19 +227,19 @@ which maps each input to the matching CLI flag — the test suite parses
 ## Honest limits
 
 - Provenance depends on commit authorship — squashed or rebased PRs lose
-  per-commit attribution (tune `agent_markers` for your workflow).
-  Uncommitted working-tree changes are included in `check`, but with no
-  commit to blame they are counted as human-written, never agent-written.
+  per-commit attribution (tune `agent_markers` for your workflow). An agent
+  committing under a plain human identity with no trailer is invisible.
 - Non-Python blast-radius extraction is heuristic.
 - The risk formula is a starting point, not a verdict — tune the threshold
   per team.
 
 ## Windows
 
-Works on Windows 11 / Python 3.11: git output is decoded as UTF-8, the
-report survives a cp1252 console (unencodable marks are replaced instead
-of crashing), and the test suite uses no `true`/`false`/`touch` and never
-reads your global gitconfig.
+Works on Windows 11 / Python 3.11: git output is decoded as UTF-8 (paths
+included), the report survives a cp1252 console (unencodable marks are
+replaced instead of crashing), gate commands are split with Windows rules
+and their executables resolved through `PATHEXT`, and the test suite uses
+no `true`/`false`/`touch` and never reads your global gitconfig.
 
 ## Tests
 
@@ -154,6 +248,9 @@ python3 -m unittest discover -s tests   # or: python3 -m pytest -q
 ```
 
 Both runners, no network. Fixtures are throwaway git repos; the suite
-covers provenance, src-layout/relative-import blast radius, the gate at
-its boundary values, policy gates without a shell, and `action.yml`
+covers provenance (including a Greek filename and the marker false
+positives), src-layout/relative-import blast radius, the gate at its
+boundary values, policy gates without a shell (string and list form, the
+Windows split rules via a monkeypatched `os.name`), base detection on
+main/master/origin-HEAD repos, the tracked-only snapshot, and `action.yml`
 against the CLI.

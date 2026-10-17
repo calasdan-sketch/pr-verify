@@ -5,7 +5,7 @@ reports: which lines an agent wrote (provenance), what could break
 (blast radius), whether policy gates pass, and a deterministic risk score
 that tells a senior how deep to review.
 
-  pr-verify check --base main
+  pr-verify check                         # base auto-detected
   pr-verify check --base origin/main --format json --min-score 60
   pr-verify init   # write an example .pr-verify.yaml
 
@@ -31,6 +31,9 @@ from . import risk as risk_mod
 
 VERSION = "0.1.0"
 
+#: Tried in order when --base is not given (after origin/HEAD).
+BASE_CANDIDATES = ("main", "master", "origin/main", "origin/master")
+
 
 def _harden_streams() -> None:
     """Never crash on a console that cannot encode the report (the box
@@ -47,11 +50,41 @@ def _harden_streams() -> None:
 
 
 def _ensure_repo(root: str) -> None:
-    p = subprocess.run(["git", "-C", root, "rev-parse", "--git-dir"],
-                       capture_output=True, timeout=15)
+    try:
+        p = subprocess.run(["git", "-C", root, "rev-parse", "--git-dir"],
+                           capture_output=True, timeout=15)
+    except FileNotFoundError:
+        print("error: git not found on PATH — pr-verify needs the git "
+              "command line tool (https://git-scm.com/downloads)",
+              file=sys.stderr)
+        sys.exit(2)
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"error: could not run git: {e}", file=sys.stderr)
+        sys.exit(2)
     if p.returncode != 0:
         print("error: not a git repo", file=sys.stderr)
         sys.exit(2)
+
+
+def _rev_ok(root: str, rev: str) -> bool:
+    p = subprocess.run(["git", "-C", root, "rev-parse", "--verify", "--quiet",
+                        rev + "^{commit}"], capture_output=True, timeout=15)
+    return p.returncode == 0
+
+
+def detect_base(root: str) -> str | None:
+    """The default branch: origin/HEAD's target, else the first of
+    main, master, origin/main, origin/master that exists."""
+    p = subprocess.run(["git", "-C", root, "symbolic-ref", "--quiet", "--short",
+                        "refs/remotes/origin/HEAD"],
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", timeout=15)
+    if p.returncode == 0 and p.stdout.strip() and _rev_ok(root, p.stdout.strip()):
+        return p.stdout.strip()
+    for cand in BASE_CANDIDATES:
+        if _rev_ok(root, cand):
+            return cand
+    return None
 
 
 def cmd_init(args) -> int:
@@ -61,7 +94,11 @@ def cmd_init(args) -> int:
         return 2
     with open(path, "w", encoding="utf-8") as f:
         f.write(config_mod.example_config())
+    base = detect_base(args.root) or "your base branch"
     print(f"wrote {config_mod.CONFIG_FILE} — tune markers, paths, gates.")
+    print(f"note: the config is read from the base ref, so commit this file "
+          f"to {base} for it to take effect (an uncommitted copy does "
+          f"nothing and is not scored).")
     return 0
 
 
@@ -81,13 +118,19 @@ def resolve_min_score(fail_on: str, min_score: int | None,
     return cfg_threshold if min_score is None else min_score
 
 
-def _report_human(prov, blast, gate_results, breakdown, min_score) -> None:
+def _report_human(result: "CheckResult") -> None:
+    prov, blast, gate_results = result.prov, result.blast, result.gates
+    breakdown, min_score = result.breakdown, result.min_score
     total_added = sum(f.added for f in prov.values())
     agent_added = sum(f.agent_added for f in prov.values())
     print("═" * 56)
     print(f"  PR VERIFY  risk {breakdown.score}/100 "
           f"({breakdown.band.upper()})")
     print("═" * 56)
+    print(f"\n  base: {result.payload['base']}"
+          + ("  (auto-detected)" if result.base_detected else ""))
+    for note in result.notes:
+        print(f"  note: {note}")
     print(f"\n  provenance: {agent_added}/{total_added} added lines "
           f"agent-authored")
     for rel in sorted(prov):
@@ -96,7 +139,7 @@ def _report_human(prov, blast, gate_results, breakdown, min_score) -> None:
             who = ", ".join(f.deleted_by) or "unknown"
             print(f"    deleted  {rel} (deleted by {who})")
         elif f.added:
-            who = ",".join(sorted(f.agents)) if f.agents else "human"
+            who = ", ".join(sorted(f.agents)) if f.agents else "human"
             print(f"    {f.label():6}  {rel} "
                   f"({f.agent_added}/{f.added} agent) [{who}]")
     print("\n  blast radius:")
@@ -104,7 +147,10 @@ def _report_human(prov, blast, gate_results, breakdown, min_score) -> None:
     if not ranked:
         print("    no files changed")
     for b in ranked:
-        print(f"    {b.file}: {b.size} downstream dependent(s)")
+        tail = ""
+        if b.external_only:
+            tail = "  (not in the worktree; nothing in-repo imports it)"
+        print(f"    {b.file}: {b.size} downstream dependent(s){tail}")
         if b.direct:
             print(f"      direct: {', '.join(b.direct[:5])}"
                   + (" …" if len(b.direct) > 5 else ""))
@@ -118,14 +164,24 @@ def _report_human(prov, blast, gate_results, breakdown, min_score) -> None:
     for name, fac in breakdown.factors.items():
         print(f"    {fac['points']:>3} pts  {name:12} {fac['detail']}")
     print()
+    failed = [g.command for g in gate_results if not g.passed]
+    if failed:
+        # A failed policy gate fails the verification whatever the score:
+        # the verdict line must say so, never end on a green tick.
+        print(f"  ✗ policy gate failed: {', '.join(failed)}")
+        score_mark = "-"
+    elif min_score is None or not breakdown.requires_review:
+        score_mark = "✓"
+    else:
+        score_mark = "✗"
     if min_score is None:
-        print(f"  - score {breakdown.score}: score gate disabled "
+        print(f"  {score_mark} score {breakdown.score}: score gate disabled "
               "(--fail-on never)")
     elif breakdown.requires_review:
-        print(f"  ✗ score {breakdown.score} >= min-score {min_score}: "
+        print(f"  {score_mark} score {breakdown.score} >= min-score {min_score}: "
               "needs senior review")
     else:
-        print(f"  ✓ score {breakdown.score} < min-score {min_score}")
+        print(f"  {score_mark} score {breakdown.score} < min-score {min_score}")
     print("═" * 56)
 
 
@@ -139,28 +195,98 @@ class CheckResult:
     gates: list
     breakdown: risk_mod.RiskBreakdown
     min_score: int | None
+    base_detected: bool = False
+    notes: list = dataclasses.field(default_factory=list)
+    nothing: bool = False     # no added/deleted lines in the range
+
+    def nothing_message(self) -> str:
+        base = self.payload["base"]
+        msg = (f"no added lines in {base}..{self.payload['head']} — "
+               f"nothing to verify")
+        for note in self.notes:
+            msg += f"\nnote: {note}"
+        return msg
 
 
-def run_check(args) -> CheckResult | None:
-    """Run the verification. Returns None when there is nothing to verify.
-    Raises ValueError/RuntimeError for a bad config at the base ref."""
+def _config_note(root: str, base: str) -> str | None:
+    """Say so when the worktree's .pr-verify.yaml is not the one in
+    effect (the base ref's copy is)."""
+    path = os.path.join(root, config_mod.CONFIG_FILE)
+    if not os.path.exists(path):
+        return None
+    p = subprocess.run(["git", "-C", root, "diff", "--quiet", base, "--",
+                        config_mod.CONFIG_FILE],
+                       capture_output=True, timeout=15)
+    p2 = subprocess.run(["git", "-C", root, "cat-file", "-e",
+                         f"{base}:{config_mod.CONFIG_FILE}"],
+                        capture_output=True, timeout=15)
+    if p2.returncode != 0:
+        return (f"{config_mod.CONFIG_FILE} exists in the worktree but not at "
+                f"{base}: defaults are in effect — commit it to {base}")
+    if p.returncode != 0:
+        return (f"{config_mod.CONFIG_FILE} in the worktree differs from "
+                f"{base}: the {base} version is in effect — commit it to "
+                f"{base}")
+    return None
+
+
+def run_check(args) -> CheckResult:
+    """Run the verification. The result's `nothing` is True when the range
+    has no added or deleted lines. Raises ValueError/RuntimeError for a
+    bad config at the base ref or when no base branch can be found."""
     root = args.root
-    cfg = config_mod.load(root, args.base)
+    base_detected = False
+    base = args.base
+    if not base:
+        base = detect_base(root)
+        base_detected = True
+        if not base:
+            raise RuntimeError(
+                "could not detect the base branch (no origin/HEAD, main, "
+                "master, origin/main or origin/master) — pass --base <ref>")
+    elif not _rev_ok(root, base):
+        raise RuntimeError(f"base ref {base!r} does not exist — pass --base "
+                           f"<ref> (tried as given; detection would use: "
+                           f"{detect_base(root) or 'nothing found'})")
+    cfg = config_mod.load(root, base)
     min_score = resolve_min_score(args.fail_on, args.min_score,
                                   cfg["risk_threshold"])
+    notes: list[str] = []
+    note = _config_note(root, base)
+    if note:
+        notes.append(note)
 
     # Default head (HEAD) also verifies uncommitted working-tree changes:
     # snapshot them into a synthetic commit so diff/blame see everything.
     # An explicit --head means "committed range only".
     head = args.head
+    untracked_skipped: list[str] = []
+    include_untracked = bool(getattr(args, "include_untracked", False))
     if head == "HEAD":
-        snap = prov_mod.snapshot_worktree(root)
+        snap = prov_mod.snapshot_worktree(root, include_untracked=include_untracked)
         if snap:
             head = snap
-    prov = prov_mod.analyze(root, args.base, head,
-                            cfg["agent_markers"])
+        if not include_untracked:
+            untracked_skipped = [p for p in prov_mod.untracked_files(root)
+                                 if p != config_mod.CONFIG_FILE]
+            if untracked_skipped:
+                shown = ", ".join(untracked_skipped[:5])
+                if len(untracked_skipped) > 5:
+                    shown += f", … ({len(untracked_skipped)} total)"
+                notes.append(f"{len(untracked_skipped)} untracked file(s) not "
+                             f"verified ({shown}) — `git add` them or pass "
+                             f"--include-untracked")
+    prov = prov_mod.analyze(root, base, head, cfg["agent_markers"])
     if not prov:
-        return None
+        empty = risk_mod.score({}, {}, [], [], 101)
+        return CheckResult(code=0, prov={}, blast={}, gates=[],
+                           breakdown=empty, min_score=min_score,
+                           base_detected=base_detected, notes=notes,
+                           nothing=True,
+                           payload={"tool": "pr-verify", "version": VERSION,
+                                    "base": base, "base_detected": base_detected,
+                                    "head": args.head, "min_score": min_score,
+                                    "notes": notes, "files": {}})
     blast = br_mod.analyze(root, list(prov.keys()))
     gate_results = (gates_mod.run_gates(root, cfg["gates"], cfg["timeout"])
                     if not args.skip_gates else [])
@@ -171,8 +297,10 @@ def run_check(args) -> CheckResult | None:
                                101 if min_score is None else min_score)
     payload = {
         "tool": "pr-verify", "version": VERSION,
-        "base": args.base, "head": args.head,
+        "base": base, "base_detected": base_detected, "head": args.head,
         "min_score": min_score,
+        "notes": notes,
+        "untracked_skipped": untracked_skipped,
         "risk": breakdown.as_dict(),
         "files": {
             rel: {"added": f.added, "agent_added": f.agent_added,
@@ -180,7 +308,8 @@ def run_check(args) -> CheckResult | None:
                   "deleted": f.deleted, "deleted_by": f.deleted_by}
             for rel, f in prov.items()},
         "blast_radius": {
-            rel: {"direct": b.direct, "transitive": b.transitive}
+            rel: {"direct": b.direct, "transitive": b.transitive,
+                  "external_only": b.external_only}
             for rel, b in blast.items()},
         "gates": [g.as_dict() for g in gate_results],
     }
@@ -194,15 +323,15 @@ def run_check(args) -> CheckResult | None:
         code = 0
     return CheckResult(code=code, payload=payload, prov=prov, blast=blast,
                        gates=gate_results, breakdown=breakdown,
-                       min_score=min_score)
+                       min_score=min_score, base_detected=base_detected,
+                       notes=notes)
 
 
 def render(result: CheckResult, fmt: str) -> None:
     if fmt == "json":
         print(json.dumps(result.payload, indent=2))
     else:
-        _report_human(result.prov, result.blast, result.gates,
-                      result.breakdown, result.min_score)
+        _report_human(result)
 
 
 def cmd_check(args) -> int:
@@ -212,8 +341,8 @@ def cmd_check(args) -> int:
     except (RuntimeError, ValueError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
-    if result is None:
-        print(f"no added lines in {args.base}..{args.head} — nothing to verify")
+    if result.nothing:
+        print(result.nothing_message())
         return 0
     render(result, args.format)
     return result.code
@@ -241,11 +370,17 @@ def build_parser() -> argparse.ArgumentParser:
     i.add_argument("--force", action="store_true")
 
     c = sub.add_parser("check", help="Verify a diff range.")
-    c.add_argument("--base", default="main",
-                   help="Base ref (default: main).")
+    c.add_argument("--base", default=None,
+                   help="Base ref (default: auto-detect — origin/HEAD, then "
+                        "main, master, origin/main, origin/master; the "
+                        "report says which was used).")
     c.add_argument("--head", default="HEAD",
-                   help="Head ref (default: HEAD, uncommitted "
-                        "working-tree changes included).")
+                   help="Head ref (default: HEAD, uncommitted changes to "
+                        "tracked files included).")
+    c.add_argument("--include-untracked", action="store_true",
+                   help="Also verify untracked (not yet `git add`ed) files. "
+                        "Off by default: snapshotting writes their content "
+                        "into .git/objects (a dangling commit, pruned by gc).")
     c.add_argument("--format", choices=["human", "json"], default="human")
     c.add_argument("--fail-on", choices=["high", "any-risk", "never"],
                    default="high",

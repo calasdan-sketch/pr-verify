@@ -10,6 +10,7 @@ from contextlib import redirect_stderr, redirect_stdout
 
 from pr_verify import cli as cli_mod
 from pr_verify import config as config_mod
+from pr_verify import provenance as pv
 from pr_verify import risk as rk
 
 from fixture import commit_at_new_base, make_pr_repo
@@ -28,11 +29,19 @@ def _check(tmp, base, *extra):
 
 class TestGateRule(unittest.TestCase):
     def test_gate_boundary(self):
-        self.assertFalse(rk.gate(69, 70))
-        self.assertTrue(rk.gate(70, 70))   # equal fails
-        self.assertTrue(rk.gate(71, 70))
-        self.assertTrue(rk.gate(0, 0))
-        self.assertFalse(rk.gate(100, 101))
+        # score() computes requires_review as score >= threshold (equal
+        # fails); drive it with an all-agent file worth exactly 40 + 5 pts.
+        def score_at(threshold):
+            f = pv.FileProvenance(file="a.py")
+            f.added = f.agent_added = 10
+            return rk.score({"a.py": f}, {}, [], [], threshold)
+
+        self.assertEqual(score_at(45).score, 45)
+        self.assertFalse(score_at(46).requires_review)
+        self.assertTrue(score_at(45).requires_review)   # equal fails
+        self.assertTrue(score_at(44).requires_review)
+        self.assertTrue(rk.score({}, {}, [], [], 0).requires_review)   # 0 >= 0
+        self.assertFalse(rk.score({}, {}, [], [], 101).requires_review)
 
     def test_resolve_min_score(self):
         self.assertEqual(cli_mod.resolve_min_score("high", None, 70), 70)

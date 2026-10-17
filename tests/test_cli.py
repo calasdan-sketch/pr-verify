@@ -52,7 +52,8 @@ class TestCLI(unittest.TestCase):
         self.assertIn("app/auth.py", data["files"])
         self.assertEqual(data["files"]["app/auth.py"]["label"], "agent")
         self.assertEqual(data["files"]["app/core.py"]["label"], "mixed")
-        self.assertIn("claude-bot", data["files"]["app/auth.py"]["agents"])
+        # agents are shown as "author (marker)" so the reader sees WHY
+        self.assertIn("claude-bot (claude)", data["files"]["app/auth.py"]["agents"])
         self.assertIn("gates", data)
         self.assertEqual(data["risk"]["band"], "medium")
         self.assertEqual(code, 0)
@@ -162,7 +163,9 @@ class TestCLI(unittest.TestCase):
 
     def test_dirty_worktree_included(self):
         # Uncommitted working-tree changes (the Claude Code workflow) must
-        # be verified too, not just committed diffs.
+        # be verified too, not just committed diffs. Untracked files need
+        # --include-untracked (see test_round3_fixes: they would otherwise
+        # be written into .git/objects by the snapshot).
         tmp, BASE = make_pr_repo()
         with open(os.path.join(tmp, "app/core.py"), "a", encoding="utf-8",
                   newline="\n") as f:
@@ -172,7 +175,7 @@ class TestCLI(unittest.TestCase):
             f.write("def s():\n    return 1\n")
         buf = io.StringIO()
         with redirect_stdout(buf):
-            run("--root", tmp, "check", "--base", BASE,
+            run("--root", tmp, "check", "--base", BASE, "--include-untracked",
                 "--skip-gates", "--format", "json")
         data = json.loads(buf.getvalue())
         # brand-new uncommitted file is seen...

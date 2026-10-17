@@ -25,9 +25,14 @@ Bands: 0-29 low · 30-69 medium · 70-100 high — labels only.
 THE GATE (one rule, everywhere): the verification fails when
 score >= min_score. min_score is --min-score, else the config's
 risk_threshold, else 70. A score exactly equal to min_score fails.
-requires_review in the JSON, the ✗/✓ line in the human report and the
-exit code are all computed by gate() below from that one comparison;
-the band names never decide pass/fail.
+requires_review (computed here, in score()) feeds the JSON, the ✗/✓ line
+in the human report and the exit code -- one comparison; the band names
+never decide pass/fail.
+
+Test files (for no_tests) are recognised by path component -- tests/,
+test/, __tests__/, spec/ -- or by filename pattern: test_*.py, *_test.*,
+*.test.*, *.spec.*, *Test.java, *Tests.cs, conftest.py. A bare "test"
+substring is not enough: latest.py and attestation.py are source.
 """
 
 from __future__ import annotations
@@ -57,16 +62,19 @@ class RiskBreakdown:
 
 DEFAULT_MIN_SCORE = 70
 
-
-def gate(score: int, min_score: int) -> bool:
-    """True when the score fails the gate: score >= min_score."""
-    return int(score) >= int(min_score)
+_TEST_DIRS = {"tests", "test", "__tests__", "spec", "specs", "testing"}
+_TEST_FILE_GLOBS = ("test_*", "*_test.*", "*.test.*", "*.spec.*",
+                    "*Test.java", "*Tests.java", "*Test.kt", "*Tests.cs",
+                    "*Test.cs", "*_spec.rb", "conftest.py")
 
 
 def _is_test_file(rel: str) -> bool:
-    low = rel.lower()
-    return ("test" in low.split("/")[-1] or "/tests/" in low
-            or low.startswith("tests/"))
+    parts = rel.replace("\\", "/").split("/")
+    if any(p.lower() in _TEST_DIRS for p in parts[:-1]):
+        return True
+    base = parts[-1]
+    return any(fnmatch.fnmatchcase(base, g) or fnmatch.fnmatchcase(base.lower(), g)
+               for g in _TEST_FILE_GLOBS)
 
 
 def _sensitive_candidates(f: str) -> list[str]:
@@ -171,5 +179,6 @@ def score(prov: dict[str, prov_mod.FileProvenance],
 
     total = min(100, sum(f["points"] for f in factors.values()))
     band = "low" if total < 30 else "medium" if total < 70 else "high"
+    # THE gate: one comparison, score >= min_score fails (equal fails).
     return RiskBreakdown(score=total, band=band, factors=factors,
-                         requires_review=gate(total, threshold))
+                         requires_review=total >= int(threshold))

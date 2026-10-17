@@ -2,9 +2,9 @@ name: pr-verify
 description: Deterministic trust scoring for agent-authored PRs - provenance, blast radius, policy gates, risk score. Fails the job when the score reaches min-score or a policy gate fails.
 inputs:
   base:
-    description: Base ref to diff against (same as --base).
+    description: Base ref to diff against (same as --base). Empty auto-detects origin/HEAD, main, master, origin/main or origin/master; in CI pass origin/main explicitly.
     required: false
-    default: main
+    default: ""
   head:
     description: Head ref (same as --head). The default HEAD includes uncommitted changes.
     required: false

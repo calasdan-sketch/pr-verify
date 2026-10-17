@@ -32,7 +32,7 @@ class TestProvenance(unittest.TestCase):
     def test_agent_identities(self):
         tmp, BASE = make_pr_repo()
         prov = pv.analyze(tmp, BASE, "HEAD", MARKERS)
-        self.assertIn("claude-bot", prov["app/auth.py"].agents)
+        self.assertIn("claude-bot (claude)", prov["app/auth.py"].agents)
 
     def test_no_markers_no_agents(self):
         tmp, BASE = make_pr_repo()
