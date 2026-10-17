@@ -84,16 +84,11 @@ def main(argv: list[str] | None = None, environ: dict | None = None) -> int:
     try:
         result = cli.run_check(args)
     except (RuntimeError, ValueError) as e:
-        print(f"error: {e}", file=sys.stderr)
+        cli._eprint(f"error: {e}")
         write_outputs({"exit-code": 2}, env.get("GITHUB_OUTPUT"))
         return 2
-    if result.nothing:
-        print(result.nothing_message())
-        outputs = {"score": 0, "band": "low", "requires-review": "false",
-                   "exit-code": 0}
-        write_outputs(outputs, env.get("GITHUB_OUTPUT"))
-        return 0
-    cli.render(result, args.format)
+    with cli._stdout_may_close():
+        cli.render(result, args.format)
     outputs = {
         "score": result.breakdown.score,
         "band": result.breakdown.band,

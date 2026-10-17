@@ -58,6 +58,9 @@ def _scalar(s: str):
         inner = s[1:-1]
         if s[0] == '"':
             inner = inner.replace('\\"', '"').replace("\\\\", "\\")
+        else:
+            # single quotes: '' is the only escape, one literal quote
+            inner = inner.replace("''", "'")
         return inner
     low = s.lower()
     if low in ("null", "~", "none", ""):
@@ -192,6 +195,9 @@ def _parse_block(items, pos, indent, depth):
             f"maximum nesting depth ({MAX_DEPTH}) exceeded", items[pos][0]
         )
     first = items[pos][2]
+    if first.startswith("["):  # "key:\n  []" — a flow list on its own line
+        _check_value(first, items[pos][0])
+        return _flow_list(first, items[pos][0]), pos + 1
     if first == "-" or first.startswith("- "):
         return _parse_list(items, pos, indent, depth)
     return _parse_map(items, pos, indent, depth)

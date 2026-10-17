@@ -107,7 +107,9 @@ def email_matches(email: str, marker: str) -> bool:
 def _trailers(body: str) -> list[tuple[str, str]]:
     """(name, email) pairs from trailer lines in the body."""
     out: list[tuple[str, str]] = []
-    for line in (body or "").splitlines():
+    # lines end at "\n", as in git: str.splitlines() would also cut at
+    # \x0b \x1e \u2028 ..., so `Co-Authored-By:\x1e Claude <x>` lost its value
+    for line in (body or "").split("\n"):
         m = _TRAILER_RE.match(line)
         if not m or m.group(1).lower() not in TRAILER_KEYS:
             continue

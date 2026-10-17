@@ -31,6 +31,16 @@ The report says which base was used (`base: master  (auto-detected)`); pass
 `--base <ref>` to choose. Without `git` on PATH or outside a repo the tool
 prints a one-line error and exits 2.
 
+Start it anywhere inside the repository. The top level is found with `git
+rev-parse --show-toplevel` and everything — paths, blame, the snapshot of
+uncommitted changes, the blast-radius scan, the gates (which run from the
+top level) — is computed from there, so `pr-verify check` run from `src/`
+gives the same report as from the root. `--root <path>` takes any path
+inside the repository, a subdirectory included, and still verifies the
+whole repository; the report adds a note when the top level is not the
+directory you gave. `pr-verify init` writes `.pr-verify.yaml` at the top
+level, where the base ref's copy is read from.
+
 ## What it reports
 
 **Provenance** — every added line labeled agent/human via `git blame` +
@@ -66,14 +76,65 @@ Non-ASCII file names (`app/Καλάς.py`) are files of their own: git is run
 with `core.quotePath=false` and quoted diff headers are unescaped, so
 their hunks are never credited to the previous file.
 
+Everything git prints is read as text the PR's author wrote. A `\x1e` in
+a commit body, subject or author name, a vertical tab or `U+2028` in a file
+line, or a line that merely reads `++ /dev/null` cannot cut a trailer off,
+drop a commit, forge a `git blame` or `git diff` record, or end a file's
+hunks: output is read as bytes and split on `\n` only, path lists use
+`-z`, the diff is walked by the line counts in its hunk headers, and
+`git show` is NUL-framed and checked against the commits asked for. If
+that check ever fails the run stops with an error (exit 2) instead of
+guessing who wrote a commit.
+
+The diff is read the way a machine reads it, not as a person likes to see
+it. It comes from git's plumbing (`git diff-tree`), which ignores
+`color.ui`, `diff.noprefix`, `diff.external`, `diff.interHunkContext`,
+`diff.submodule` and the other settings that reshape `git diff`, and the
+repository's `.gitattributes` is left out of it: a PR cannot hide a source
+file from the gate by adding `*.py binary` or `*.py -diff`, and `diff`
+cannot turn a real binary into a pile of added lines. `git blame` ignores
+a `blame.ignoreRevsFile` for the same reason (that file is in the PR too).
+
+What the report prints is that text again — file names, author names, the
+name of a deleted file — and a terminal acts on some of it: an escape
+sequence recolors the screen or rewrites what is already there, a carriage
+return overwrites the line, and a newline inside a name starts a line of
+its own, which can read as a verdict (in a GitHub Actions log, as a
+`::command::` that adds an annotation or switches command processing off).
+So the human report and the error messages never print such a character.
+C0 and C1 controls, DEL, the Unicode line and paragraph separators and the
+bidirectional overrides and isolates are shown as the escapes Python
+writes for them (`\x1b`, `\x9b`; `\u` and four hex digits above U+00FF), a
+newline inside a name as `\x0a`, and a line that would start with `::` has
+its first colon shown as `\x3a`. Tab is kept, and so is every other
+character: accented letters, CJK, emoji, joiners, the box drawing of the
+report. `--format json` is exact — JSON escapes those characters itself, and
+a program reads the real name.
+
 **Blast radius** — reverse dependency graph: for each changed file, the
 transitive set of in-repo dependents that could break. Python via AST —
 absolute imports, relative imports (`from . import x`, `from ..core import
 y`, resolved against the importing file's own package), `from pkg import
 submodule`, and `src/` layouts (`src/pkg/core.py` answers to `pkg.core`);
-JS/TS/Go/Rust/Java/Ruby/PHP via heuristic fallback. A deleted file that
-nothing in the repo still imports is marked `external_only` (JSON) / "not
-in the worktree; nothing in-repo imports it" (report).
+JS/TS/Go/Rust/Java/Ruby/PHP via heuristic fallback. Those file types are
+read from the worktree; `node_modules`, `vendor`, `build`, `dist`, `venv`,
+`.venv`, `.tox`, `__pycache__` and `.git` are skipped.
+
+A changed file the graph does not contain says why, instead of a bare "0
+downstream dependent(s)". The JSON carries the same as a code in
+`blast_radius.<file>.scan`:
+
+| `scan` | Report | Meaning |
+|---|---|---|
+| `graph` | *(nothing)* | in the import graph |
+| `not_source` | `(.md files are not scanned for imports)` | a file type the scan does not read (README, YAML, logs …); no dependents are guessed for it |
+| `skipped_dir` | `(in vendor/, which the import scan skips; nothing in-repo imports it)` | on disk, under a skipped directory |
+| `not_in_worktree` | `(not in the worktree; nothing in-repo imports it)` | deleted, or absent from the checked-out tree |
+| `not_scanned` | `(not reached by the import scan; nothing in-repo imports it)` | on disk, but the walk never reached it |
+
+A file outside the graph that code elsewhere still imports by name (a
+deleted module, a vendored one) keeps those dependents and prints no
+label; `external_only` is true when none was found.
 
 **Policy gates** — commands from `.pr-verify.yaml` (tests, typecheck,
 lint), run with timeout, pass/fail captured. The config is read from the
@@ -133,6 +194,13 @@ comparison.
 - A failing **policy gate** fails the verification regardless of `--fail-on`
   — the tool cannot vouch for a diff whose tests or lint failed.
 
+The exit status is the verdict and nothing else changes it: piping the
+report into a reader that stops early (`pr-verify check | head -1`) cuts it
+short quietly — no traceback — and the exit status stays 0 for a pass and 1
+for a fail. The same holds for `--help`, `--version` and error messages (2
+stays 2), and on Windows, where such a pipe is not a `BrokenPipeError` but
+an `OSError` with errno 22 that shows up when the output is flushed.
+
 ## Uncommitted changes and the snapshot
 
 With the default `--head HEAD`, `check` also verifies your uncommitted
@@ -163,6 +231,13 @@ the file itself is excluded from provenance and scoring.
 ```bash
 python3 -m pr_verify check --base origin/main --format json --min-score 60
 ```
+
+`--format json` prints one JSON document and nothing else. With nothing to
+verify (no line added or deleted between base and head) it is still that
+document, with the same keys: `files` and `blast_radius` are `{}`, `gates`
+is `[]`, `risk.score` is 0 (`low`, `requires_review` false) and the exit
+status is 0; `notes` and `untracked_skipped` say what was left out. The
+human format says `no added lines in main..HEAD — nothing to verify`.
 
 ### GitHub Action
 
@@ -229,7 +304,17 @@ which maps each input to the matching CLI flag — the test suite parses
 - Provenance depends on commit authorship — squashed or rebased PRs lose
   per-commit attribution (tune `agent_markers` for your workflow). An agent
   committing under a plain human identity with no trailer is invisible.
+- A file git considers binary produces no diff text, so its lines are not
+  scored. That is git's own test, a NUL byte in the first 8000 bytes
+  (images, archives, UTF-16 text — and a source file with a NUL put
+  there). `.gitattributes` does not decide it: it is ignored, so a PR
+  cannot hide a source file by marking it `binary` or `-diff`. Attributes
+  you set yourself in `.git/info/attributes` or a global attributes file
+  still apply.
 - Non-Python blast-radius extraction is heuristic.
+- The blast radius is read from the files in the worktree, whatever
+  `--head` says: to verify a branch other than the checked-out one, check
+  it out.
 - The risk formula is a starting point, not a verdict — tune the threshold
   per team.
 
@@ -252,5 +337,11 @@ covers provenance (including a Greek filename and the marker false
 positives), src-layout/relative-import blast radius, the gate at its
 boundary values, policy gates without a shell (string and list form, the
 Windows split rules via a monkeypatched `os.name`), base detection on
-main/master/origin-HEAD repos, the tracked-only snapshot, and `action.yml`
-against the CLI.
+main/master/origin-HEAD repos, the tracked-only snapshot, `action.yml`
+against the CLI, running from a subdirectory, a closed output pipe (also
+the way Windows reports it, faked on every platform), a PR's
+`.gitattributes` and a user's git settings that would change the diff, text
+that tries to forge git's own records (separators in commit messages and
+file lines) or the report itself (control characters and newlines in
+names), JSON for a range with nothing to verify, and a scan of the
+repository's own files for invisible characters.

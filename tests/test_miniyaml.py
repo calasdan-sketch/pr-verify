@@ -102,5 +102,64 @@ class TestStrictMalformed(unittest.TestCase):
         self.assertEqual(miniyaml.safe_load("g: 'a: b'"), {"g": "a: b"})
 
 
+class TestSingleQuoteEscape(unittest.TestCase):
+    """YAML single-quoted scalars: `''` is one `'`, and that is the only
+    escape (no backslash escapes in single quotes)."""
+
+    def load(self, text):
+        return miniyaml.safe_load(text)
+
+    def test_doubled_quote_is_one_quote(self):
+        self.assertEqual(self.load("a: 'it''s'"), {"a": "it's"})
+        self.assertEqual(self.load("a: 'a''b''c'"), {"a": "a'b'c"})
+
+    def test_quote_at_the_edges_of_the_scalar(self):
+        self.assertEqual(self.load("a: '''x'"), {"a": "'x"})
+        self.assertEqual(self.load("a: 'x'''"), {"a": "x'"})
+        self.assertEqual(self.load("a: ''''"), {"a": "'"})
+        self.assertEqual(self.load("a: ''"), {"a": ""})
+
+    def test_escaped_quote_does_not_end_the_quoted_region(self):
+        # '#' and ':' after an escaped quote are still inside the string
+        self.assertEqual(self.load("a: 'it''s # not a comment'"),
+                         {"a": "it's # not a comment"})
+        self.assertEqual(self.load("a: 'it''s: fine'"), {"a": "it's: fine"})
+        self.assertEqual(self.load("a: 'it''s'  # a real comment"),
+                         {"a": "it's"})
+
+    def test_in_lists(self):
+        self.assertEqual(self.load("a: ['it''s', 'x', 'y,''z']"),
+                         {"a": ["it's", "x", "y,'z"]})
+        self.assertEqual(self.load("a:\n  - 'it''s'\n  - 'plain'"),
+                         {"a": ["it's", "plain"]})
+        self.assertEqual(self.load("- 'don''t'"), ["don't"])
+
+    def test_nothing_else_changes(self):
+        # double quotes: `''` is two characters, the escapes are exactly
+        # what they were
+        self.assertEqual(self.load('a: "it\'\'s"'), {"a": "it''s"})
+        self.assertEqual(self.load('a: "a\\"b"'), {"a": 'a"b'})
+        # single quotes: backslashes stay literal
+        self.assertEqual(self.load("a: 'C:\\dir\\x'"), {"a": "C:\\dir\\x"})
+        self.assertEqual(self.load("a: 'a\\\"b'"), {"a": 'a\\"b'})
+        # plain scalars have no escapes at all
+        self.assertEqual(self.load("a: it's"), {"a": "it's"})
+        self.assertEqual(self.load("a: it''s"), {"a": "it''s"})
+
+    def test_unterminated_single_quote_still_rejected(self):
+        with self.assertRaisesRegex(ValueError, r"unterminated quoted"):
+            self.load("a: 'oops")
+
+
+class TestEmptyBlockList(unittest.TestCase):
+    def test_flow_list_on_own_line(self):
+        self.assertEqual(miniyaml.safe_load("layers:\n  []\nrules: [a]\n"),
+                         {"layers": [], "rules": ["a"]})
+
+    def test_extra_line_after_flow_block_rejected(self):
+        with self.assertRaises(ValueError):
+            miniyaml.safe_load("layers:\n  []\n  - x\n")
+
+
 if __name__ == "__main__":
     unittest.main()

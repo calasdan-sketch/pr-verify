@@ -1,7 +1,7 @@
 """Provenance: which added lines were written by an agent vs a human.
 
 Method (deterministic, no LLM):
-  1. `git diff -U0 base..head` -> added lines per file (hunks).
+  1. `git diff-tree -p -U0 -M base head` -> added lines per file (hunks).
   2. `git blame --porcelain <head> -- <file>` -> commit per line.
   3. one `git show -s` for all those commits -> author name/email,
      subject, body.
@@ -16,7 +16,22 @@ call here runs with `-c core.quotePath=false`, and a quoted header is
 still unescaped defensively, so a Greek or Chinese filename is a file of
 its own and never has its hunks appended to the previous file.
 
-Deleted files are reported too: `git diff --diff-filter=D` finds them and
+Everything git prints is parsed as untrusted text: file lines, file names,
+commit subjects, bodies and author names all belong to the PR's author, so
+nothing inside them may act as a boundary. Output is read as bytes and split
+on "\\n" only (str.splitlines() also breaks at \\x0b \\x0c \\x1c-\\x1e \\x85
+\\u2028 \\u2029, and text=True turns a lone \\r into \\n), path lists use -z,
+the diff is walked by the line counts in its hunk headers (a file line
+`++ b/x` is not a `+++` file header), and `git show` is read NUL-framed and
+checked against the commits asked for (see _commit_text).
+
+The diff is read the way a machine reads it, not the way a person likes to
+see it: with the repository's .gitattributes out of the picture (a PR can
+add one that marks a source file `binary`, and git then prints "Binary files
+differ" instead of its lines) and through plumbing, which ignores the user's
+color, prefix, context and external-diff settings (see _patch).
+
+Deleted files are reported too: `git diff-tree --diff-filter=D` finds them and
 `git log --diff-filter=D` identifies the deleting commit(s), so a deletion
 can never slip through as "nothing to verify". For a deleted file the
 blast-radius scan matches the file's module names against the imports of
@@ -49,25 +64,38 @@ from . import markers as markers_mod
 #: the copy in effect is the one at the base ref, see config.py).
 CONFIG_FILE = ".pr-verify.yaml"
 
-_GIT_BASE = ["git", "-c", "core.quotePath=false"]
+#: Every git call pins the user's config where it would change the shape of
+#: the output: no C-quoting of non-ASCII paths, and no gpg verification
+#: chatter (log.showSignature=true prints it to stdout, ahead of each
+#: signed commit's record).
+_GIT_BASE = ["git", "-c", "core.quotePath=false",
+             "-c", "log.showSignature=false"]
+
+
+def _git_bytes(root: str, *args: str, env: dict | None = None) -> bytes:
+    """stdout of `git <args>`, undecoded."""
+    p = subprocess.run([*_GIT_BASE, "-C", root, *args], capture_output=True,
+                       timeout=60, env=env)
+    if p.returncode != 0:
+        err = p.stderr.decode("utf-8", "replace").strip()[:200]
+        raise RuntimeError(f"git {' '.join(args)} failed: {err}")
+    return p.stdout
 
 
 def _git(root: str, *args: str, env: dict | None = None) -> str:
-    p = subprocess.run([*_GIT_BASE, "-C", root, *args], capture_output=True,
-                       text=True, encoding="utf-8", errors="replace",
-                       timeout=60, env=env)
-    if p.returncode != 0:
-        raise RuntimeError(f"git {' '.join(args)} failed: {p.stderr.strip()[:200]}")
-    return p.stdout
+    """stdout of `git <args>`. Decoded here from the raw bytes: with
+    text=True subprocess first turns every lone \\r into \\n, so a file line
+    holding one would read like a line break of git's own output."""
+    return _git_bytes(root, *args, env=env).decode("utf-8", "replace")
 
 
 def untracked_files(root: str) -> list[str]:
     """Untracked, not-ignored files (repo-relative)."""
     try:
-        out = _git(root, "ls-files", "--others", "--exclude-standard")
+        out = _git(root, "ls-files", "--others", "--exclude-standard", "-z")
     except RuntimeError:
         return []
-    return sorted(p for p in out.splitlines() if p)
+    return sorted(p for p in out.split("\0") if p)
 
 
 def snapshot_worktree(root: str, include_untracked: bool = False) -> str | None:
@@ -147,7 +175,9 @@ class FileProvenance:
         return "mixed"
 
 
-_DIFF_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+#: `@@ -a[,b] +c[,d] @@`: groups are b (old lines), c (first new line), d
+#: (new lines); an omitted count means 1.
+_DIFF_HUNK_RE = re.compile(r"^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 _C_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\", '"': '"',
               "a": "\a", "b": "\b", "f": "\f", "v": "\v"}
 
@@ -195,38 +225,93 @@ def _header_path(line: str) -> str | None:
     return rest
 
 
+#: How a patch is asked for. `git diff` is porcelain: color.ui, diff.noprefix,
+#: diff.interHunkContext, diff.submodule, diff.renames ... all reshape its
+#: output, GIT_EXTERNAL_DIFF replaces it, and the parser below reads it line
+#: by line. Plumbing (`git diff-tree`) takes none of them, so the patch looks
+#: the same on every machine. What `git diff` decides for itself is spelled
+#: out: rename detection (-M, on by default there). The two --no- options are
+#: plumbing's own defaults, stated so that nothing can change them.
+_PATCH = ("diff-tree", "-p", "-U0", "-M", "--no-commit-id",
+          "--no-ext-diff", "--no-textconv")
+
+
+def _patch(root: str, base: str, head: str) -> str:
+    """The patch from base to head, as the files are and not as the
+    repository's .gitattributes would like them shown.
+
+    Attributes steer diff: `-diff` or `binary` turns a file into "Binary
+    files differ", `diff` forces text on a real binary, and a `diff=<name>`
+    driver can convert the content -- and .gitattributes is in the PR. git
+    reads them from the worktree and, failing that, from the index, so this
+    runs against an empty work tree and an index that does not exist: git
+    finds no attributes and falls back to its own test for a binary (a NUL in
+    the first 8000 bytes), which a source file passes and a PNG does not.
+    (`--text` would turn the PNG into added lines too.) The repository's
+    objects are used as they are: only the work tree and the index are
+    replaced."""
+    # a directory name is bytes to the file system, not necessarily UTF-8
+    gitdir = os.fsdecode(_git_bytes(root, "rev-parse",
+                                    "--absolute-git-dir")).rstrip("\r\n")
+    with tempfile.TemporaryDirectory(prefix="pr-verify-",
+                                     ignore_cleanup_errors=True) as empty:
+        env = dict(os.environ)
+        env["GIT_INDEX_FILE"] = os.path.join(empty, "index")
+        return _git(empty, "--git-dir", gitdir, "--work-tree", empty,
+                    *_PATCH, base, head, "--", env=env)
+
+
 def added_lines(root: str, base: str, head: str = "HEAD") -> dict[str, list[int]]:
     """Repo-relative file -> sorted list of added line numbers (at head)."""
-    out = _git(root, "diff", "-U0", f"{base}..{head}", "--")
+    out = _patch(root, base, head)
     result: dict[str, list[int]] = {}
     cur_file: str | None = None
     new_line = 0
-    for line in out.splitlines():
+    # A hunk header says how many old (-) and new (+) lines follow it, and a
+    # context line counts on both sides (there is none under -U0, but
+    # GIT_DIFF_OPTS=-u3 asks for some).
+    # Inside a hunk every line is FILE CONTENT, whatever it starts with: the
+    # added line `++ /dev/null` reads `+++ /dev/null`, the removed SQL
+    # comment `-- x` reads `--- x`, and neither is a file header.
+    old_left = new_left = 0
+    for line in out.split("\n"):
+        if old_left or new_left:
+            mark = line[:1]
+            if mark == "-" and old_left:
+                old_left -= 1
+                continue
+            if mark == "+" and new_left:
+                if cur_file is not None:
+                    result[cur_file].append(new_line)
+                new_line += 1
+                new_left -= 1
+                continue
+            if (mark == " " or not line) and old_left and new_left:
+                old_left -= 1       # an empty line is a blank context line
+                new_left -= 1
+                new_line += 1
+                continue
+            if mark == "\\":
+                continue  # "\ No newline at end of file": on neither side
+            old_left = new_left = 0  # hunk ended early: a header after all
         if line.startswith("+++ "):
             cur_file = _header_path(line)
-            new_line = 0
             if cur_file is not None:
                 result.setdefault(cur_file, [])
         elif line.startswith("@@"):
             m = _DIFF_HUNK_RE.match(line)
-            if m and cur_file:
-                new_line = int(m.group(1))
-        elif cur_file and new_line:
-            if line.startswith("+") and not line.startswith("+++"):
-                result[cur_file].append(new_line)
-                new_line += 1
-            elif line.startswith("-") and not line.startswith("---"):
-                pass  # removed line: doesn't advance new-file numbering
-            else:
-                new_line += 1
+            if m:
+                old_left = 1 if m.group(1) is None else int(m.group(1))
+                new_line = int(m.group(2))
+                new_left = 1 if m.group(3) is None else int(m.group(3))
     return {f: sorted(ls) for f, ls in result.items() if ls}
 
 
 def deleted_files(root: str, base: str, head: str = "HEAD") -> list[str]:
     """Repo-relative paths deleted between base and head."""
-    out = _git(root, "diff", "--name-only", "--diff-filter=D",
-               f"{base}..{head}", "--")
-    return sorted(unquote_git_path(p) for p in out.splitlines() if p)
+    out = _git(root, "diff-tree", "-r", "--name-only", "-z", "--diff-filter=D",
+               "-M", "--no-commit-id", base, head, "--")
+    return sorted(p for p in out.split("\0") if p)
 
 
 def _deletion_commits(root: str, base: str, head: str,
@@ -237,13 +322,27 @@ def _deletion_commits(root: str, base: str, head: str,
     return [ln for ln in out.splitlines() if ln]
 
 
-def _blame_authors(root: str, head: str, rel: str) -> dict[int, str]:
+def _blame_options(root: str) -> list[str]:
+    """Extra `git blame` options. blame.ignoreRevsFile (a setting for
+    skipping formatting commits) makes blame look past the commits a file
+    lists, and the file is in the PR: it could list the agent's commits, and
+    their lines would read as the older, human ones. An empty
+    --ignore-revs-file clears the list. Only when the setting exists, so a
+    git older than 2.23 (which has neither) is not asked for it."""
+    p = subprocess.run([*_GIT_BASE, "-C", root, "config", "--get-all",
+                        "blame.ignoreRevsFile"], capture_output=True,
+                       timeout=15)
+    return ["--ignore-revs-file="] if p.returncode == 0 else []
+
+
+def _blame_authors(root: str, head: str, rel: str,
+                   options: list[str] | tuple = ()) -> dict[int, str]:
     """Line number -> commit sha, for <head> version of file."""
-    out = _git(root, "blame", "--porcelain", head, "--", rel)
+    out = _git(root, "blame", "--porcelain", *options, head, "--", rel)
     authors: dict[int, str] = {}
     sha = ""
     lineno = 0
-    for line in out.splitlines():
+    for line in out.split("\n"):
         if re.match(r"^[0-9a-f]{40} \d+ \d+ \d+$", line):
             parts = line.split()
             sha, lineno = parts[0], int(parts[2])
@@ -253,35 +352,48 @@ def _blame_authors(root: str, head: str, rel: str) -> dict[int, str]:
     return authors
 
 
-_REC_SEP = "\x1e"
-_FIELD_SEP = "\x00"
 #: shas per `git show` call: keeps the command line well under Windows'
 #: 8191-character limit (150 * 41 chars).
 _SHOW_CHUNK = 150
+#: fields `_commit_text` asks git for, per commit
+_SHOW_FIELDS = 5
+_BAD_SHOW = ("git show returned commit text that does not match the commits "
+             "asked for; refusing to guess who wrote them")
 
 
 def _commit_text(root: str, shas: set[str]) -> dict[str, tuple[str, str, str, str]]:
     """sha -> (author name, author email, subject, body), one git call
-    per 150 commits instead of one per commit."""
+    per 150 commits instead of one per commit.
+
+    The text is the PR author's, so it must not shape the parse. Fields are
+    NUL-framed -- the one byte that cannot occur inside a commit's text (git
+    refuses it in a message and stops at it in a header) -- and the answer
+    is checked against the question: exactly 5 fields per commit asked
+    for, every sha one we asked for, none twice. Anything else is a
+    RuntimeError, never a guess: a record that fails to parse would count
+    as human. (The earlier \\x1e record separator is accepted by git in a
+    body, a subject and an author name: it cut a Co-Authored-By trailer off
+    a body, and dropped the whole record when it sat in the name.)
+    """
     infos: dict[str, tuple[str, str, str, str]] = {}
     ordered = sorted(shas)
-    # git's %x00 / %x1e escapes: a literal NUL cannot travel through argv.
-    fmt = "--format=%H%x00%an%x00%ae%x00%s%x00%b%x1e"
+    # git's %x00 escape: a literal NUL cannot travel through argv.
+    fmt = "--format=%H%x00%an%x00%ae%x00%s%x00%b%x00"
     for i in range(0, len(ordered), _SHOW_CHUNK):
         chunk = ordered[i:i + _SHOW_CHUNK]
-        out = _git(root, "show", "-s", fmt, *chunk)
-        for rec in out.split(_REC_SEP):
-            rec = rec.strip("\n")
-            if not rec.strip():
-                continue
-            parts = rec.split(_FIELD_SEP)
-            if len(parts) < 5:
-                continue
-            sha = parts[0].strip()
-            infos[sha] = (parts[1], parts[2], parts[3],
-                          _FIELD_SEP.join(parts[4:]))
-    for sha in shas:
-        infos.setdefault(sha, (sha[:7], "", "", ""))
+        # "--": a file named like one of the shas must not make it ambiguous
+        out = _git(root, "show", "-s", fmt, *chunk, "--")
+        fields = out.split("\x00")
+        # what follows the last NUL is only git's own line break
+        if fields.pop().strip() or len(fields) != _SHOW_FIELDS * len(chunk):
+            raise RuntimeError(_BAD_SHOW)
+        for k in range(0, len(fields), _SHOW_FIELDS):
+            sha, name, email, subject, body = fields[k:k + _SHOW_FIELDS]
+            sha = sha.strip()
+            if sha not in chunk or sha in infos:
+                raise RuntimeError(_BAD_SHOW)
+            body = body.replace("\r\n", "\n").rstrip("\n")
+            infos[sha] = (name, email, subject, body)
     return infos
 
 
@@ -301,8 +413,9 @@ def analyze(root: str, base: str, head: str = "HEAD",
     blame_maps: dict[str, dict[int, str]] = {}
     del_shas: dict[str, list[str]] = {}
     all_shas: set[str] = set()
+    blame_options = _blame_options(root) if added else []
     for rel in added:
-        bm = _blame_authors(root, head, rel)
+        bm = _blame_authors(root, head, rel, blame_options)
         blame_maps[rel] = bm
         all_shas.update(bm[ln] for ln in added[rel] if ln in bm)
     for rel in deleted:

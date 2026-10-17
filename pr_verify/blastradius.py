@@ -29,6 +29,11 @@ import re
 PY_EXTS = {".py"}
 OTHER_EXTS = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
               ".go", ".rs", ".java", ".rb", ".php"}
+#: File types whose imports are read; nothing else is in the graph.
+SCANNED_EXTS = PY_EXTS | OTHER_EXTS
+#: Directories the scan never enters.
+SKIP_DIRS = frozenset({".git", "node_modules", "__pycache__", ".venv", "venv",
+                       "dist", "build", ".tox", "vendor"})
 
 _GENERIC_IMPORT_RES = [
     re.compile(r'^\s*import\s+(?:type\s+)?[{*]?[^"\']*?from\s+["\']([^"\']+)["\']'),
@@ -131,6 +136,13 @@ class BlastRadius:
     direct: list[str]          # files directly importing it
     transitive: list[str]      # all downstream dependents
     external_only: bool = False  # changed file imported by nothing in-repo
+    #: How the file was covered: "graph" (it is in the import graph) or why
+    #: it is not -- "not_source" (a file type the scan does not read; no
+    #: dependents are guessed for it), "not_in_worktree" (deleted, or absent
+    #: from the checked-out tree), "skipped_dir" (under node_modules,
+    #: vendor, build ...) or "not_scanned" (on disk, but the walk never
+    #: reached it).
+    scan: str = "graph"
 
     @property
     def size(self) -> int:
@@ -138,15 +150,31 @@ class BlastRadius:
 
 
 def _iter_files(root: str) -> list[str]:
-    skip = {".git", "node_modules", "__pycache__", ".venv", "venv",
-            "dist", "build", ".tox", "vendor"}
     out = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in skip]
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
         for fn in filenames:
-            if os.path.splitext(fn)[1].lower() in (PY_EXTS | OTHER_EXTS):
+            if os.path.splitext(fn)[1].lower() in SCANNED_EXTS:
                 out.append(os.path.join(dirpath, fn))
     return sorted(out)
+
+
+def skipped_dir(rel: str) -> str | None:
+    """The first directory in rel's path that the scan skips, or None."""
+    return next((p for p in rel.split("/")[:-1] if p in SKIP_DIRS), None)
+
+
+def _scan_status(root: str, rel: str) -> str:
+    """Why the changed file rel is not in the import graph (BlastRadius.scan).
+    A type the scan does not read comes first: whether such a file is still
+    on disk is beside the point, imports of it are never looked for."""
+    if os.path.splitext(rel)[1].lower() not in SCANNED_EXTS:
+        return "not_source"
+    if not os.path.lexists(os.path.join(root, *rel.split("/"))):
+        return "not_in_worktree"
+    if skipped_dir(rel):
+        return "skipped_dir"
+    return "not_scanned"
 
 
 def build_graph(root: str) -> dict[str, set[str]]:
@@ -224,13 +252,17 @@ def analyze(root: str, changed: list[str]) -> dict[str, BlastRadius]:
             result[rel] = BlastRadius(file=rel, direct=direct,
                                       transitive=transitive)
             continue
-        # Not in the worktree graph (deleted or unknown file): fall back
-        # to matching the file's module names against the raw imports of
-        # every file still in the worktree, so deleted imports still show
-        # their (now broken) dependents.
-        direct = dependents_of_modules(root, set(_module_candidates(rel)))
+        # Not in the worktree graph (deleted, unknown or unscanned file):
+        # fall back to matching the file's module names against the raw
+        # imports of every file still in the worktree, so deleted imports
+        # still show their (now broken) dependents. Only a file that can be
+        # imported has a module name: config.yaml is not the module
+        # `config`, so it gets no guessed dependents.
+        scan = _scan_status(root, rel)
+        direct = ([] if scan == "not_source" else
+                  dependents_of_modules(root, set(_module_candidates(rel))))
         transitive = _transitive_dependents(reverse, direct, rel)
         result[rel] = BlastRadius(file=rel, direct=direct,
                                   transitive=transitive,
-                                  external_only=not direct)
+                                  external_only=not direct, scan=scan)
     return result

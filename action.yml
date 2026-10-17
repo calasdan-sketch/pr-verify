@@ -26,7 +26,7 @@ inputs:
     required: false
     default: "false"
   root:
-    description: Repository path (same as --root). Empty means the working directory.
+    description: Path inside the repository (same as --root); the repository's top level is verified. Empty means the working directory.
     required: false
     default: ""
 outputs:
