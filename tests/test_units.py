@@ -8,7 +8,7 @@ from pr_verify import miniyaml
 from pr_verify import provenance as pv
 from pr_verify import risk as rk
 
-from fixture import commit_at_new_base, make_pr_repo
+from fixture import PASS_GATE, commit_at_new_base, make_pr_repo, yaml_str
 
 MARKERS = ["claude", "bot"]
 
@@ -215,13 +215,13 @@ class TestConfig(unittest.TestCase):
             "sensitive_paths:\n"
             '  - "*sekrit*"\n'
             "gates:\n"
-            '  - "true"\n'
+            f"  - {yaml_str(PASS_GATE)}\n"
             "risk_threshold: 55\n"
             "timeout: 60\n")})
         cfg = config_mod.load(tmp, base)
         self.assertEqual(cfg["agent_markers"], ["mybot"])
         self.assertEqual(cfg["sensitive_paths"], ["*sekrit*"])
-        self.assertEqual(cfg["gates"], ["true"])
+        self.assertEqual(cfg["gates"], [PASS_GATE])
         self.assertEqual(cfg["risk_threshold"], 55)
         self.assertEqual(cfg["timeout"], 60)
 

@@ -34,7 +34,7 @@ DEFAULTS = {
     # plain executables with arguments — no pipes, redirects, or $VARs.
     "gates": [],
     # "gates": ["python -m pytest -x -q"],
-    "risk_threshold": 70,   # >= this => exit 1 (needs senior review)
+    "risk_threshold": 70,   # score >= this fails (see risk.gate); --min-score overrides
     "timeout": 300,         # seconds per gate
 }
 
@@ -43,7 +43,8 @@ def _read_base_config(root: str, base: str) -> dict:
     """Return the parsed config file as committed at <base>, or {}."""
     p = subprocess.run(
         ["git", "-C", root, "show", f"{base}:{CONFIG_FILE}"],
-        capture_output=True, text=True, timeout=15)
+        capture_output=True, text=True, encoding="utf-8",
+        errors="replace", timeout=15)
     if p.returncode != 0:
         return {}
     try:
@@ -55,12 +56,45 @@ def _read_base_config(root: str, base: str) -> dict:
             f"multi-line scalars)") from e
 
 
+_INT_FIELDS = {"risk_threshold": (0, 100), "timeout": (1, None)}
+_LIST_FIELDS = ("agent_markers", "sensitive_paths", "gates")
+
+
+def _as_int(key: str, val, lo: int | None, hi: int | None) -> int:
+    """Coerce a config number. A YAML-quoted "70" must behave like 70, and
+    garbage must fail with a clear message instead of a TypeError when
+    the gate compares it to the score."""
+    if isinstance(val, bool) or val is None:
+        raise ValueError(f"{CONFIG_FILE}: {key} must be an integer, got {val!r}")
+    try:
+        num = int(str(val).strip())
+    except ValueError:
+        raise ValueError(
+            f"{CONFIG_FILE}: {key} must be an integer, got {val!r}") from None
+    if (lo is not None and num < lo) or (hi is not None and num > hi):
+        rng = f"{lo}..{hi}" if hi is not None else f">= {lo}"
+        raise ValueError(f"{CONFIG_FILE}: {key} must be {rng}, got {num}")
+    return num
+
+
 def load(root: str, base: str) -> dict:
     cfg = dict(DEFAULTS)
     for key, val in _read_base_config(root, base).items():
         cfg[key] = val
+    for key, (lo, hi) in _INT_FIELDS.items():
+        cfg[key] = _as_int(key, cfg[key], lo, hi)
+    for key in _LIST_FIELDS:
+        val = cfg.get(key)
+        if val is None:
+            cfg[key] = []
+        elif isinstance(val, str):
+            cfg[key] = [val]
+        elif not isinstance(val, list):
+            raise ValueError(f"{CONFIG_FILE}: {key} must be a list, got {val!r}")
     # normalize marker matching inputs
-    cfg["agent_markers"] = [m.lower() for m in cfg.get("agent_markers", [])]
+    cfg["agent_markers"] = [str(m).lower() for m in cfg["agent_markers"]]
+    cfg["sensitive_paths"] = [str(x) for x in cfg["sensitive_paths"]]
+    cfg["gates"] = [str(g) for g in cfg["gates"]]
     return cfg
 
 

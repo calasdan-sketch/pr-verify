@@ -20,7 +20,14 @@ can argue with it and tune it — a black-box score is just another opinion.
                       never trip the high threshold; deleting auth.py is at
                       least as scary as rewriting it.
 
-Bands: 0-29 low · 30-69 medium · 70-100 high (needs senior review).
+Bands: 0-29 low · 30-69 medium · 70-100 high — labels only.
+
+THE GATE (one rule, everywhere): the verification fails when
+score >= min_score. min_score is --min-score, else the config's
+risk_threshold, else 70. A score exactly equal to min_score fails.
+requires_review in the JSON, the ✗/✓ line in the human report and the
+exit code are all computed by gate() below from that one comparison;
+the band names never decide pass/fail.
 """
 
 from __future__ import annotations
@@ -46,6 +53,14 @@ class RiskBreakdown:
         return {"score": self.score, "band": self.band,
                 "factors": self.factors,
                 "requires_review": self.requires_review}
+
+
+DEFAULT_MIN_SCORE = 70
+
+
+def gate(score: int, min_score: int) -> bool:
+    """True when the score fails the gate: score >= min_score."""
+    return int(score) >= int(min_score)
 
 
 def _is_test_file(rel: str) -> bool:
@@ -157,4 +172,4 @@ def score(prov: dict[str, prov_mod.FileProvenance],
     total = min(100, sum(f["points"] for f in factors.values()))
     band = "low" if total < 30 else "medium" if total < 70 else "high"
     return RiskBreakdown(score=total, band=band, factors=factors,
-                         requires_review=total >= threshold)
+                         requires_review=gate(total, threshold))

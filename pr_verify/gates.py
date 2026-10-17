@@ -38,6 +38,7 @@ def run_gates(root: str, commands: list[str],
         try:
             p = subprocess.run(argv, shell=False, cwd=root,
                                capture_output=True, text=True,
+                               encoding="utf-8", errors="replace",
                                timeout=timeout)
             tail = (p.stdout + p.stderr)[-2000:]
             results.append(GateResult(

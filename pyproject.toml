@@ -11,3 +11,12 @@ requires-python = ">=3.10"
 
 [project.scripts]
 pr-verify = "pr_verify.cli:main"
+
+[tool.setuptools]
+packages = ["pr_verify"]
+
+[tool.pytest.ini_options]
+# tests import their shared fixture as a top-level module, like
+# `python -m unittest discover -s tests` does.
+pythonpath = ["tests"]
+testpaths = ["tests"]

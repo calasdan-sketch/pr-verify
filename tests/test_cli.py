@@ -8,8 +8,9 @@ from contextlib import redirect_stdout
 
 from pr_verify import cli as cli_mod
 
-from fixture import (commit_at_new_base, make_deletion_repo,
-                      make_pr_repo, make_sensitive_deletion_repo)
+from fixture import (FAIL_GATE, PASS_GATE, PY, commit_at_new_base, gate,
+                     make_deletion_repo, make_pr_repo,
+                     make_sensitive_deletion_repo, yaml_str)
 
 
 def run(*argv) -> int:
@@ -20,9 +21,10 @@ class TestCLI(unittest.TestCase):
     def test_init(self):
         import tempfile
         tmp = tempfile.mkdtemp()
-        self.assertEqual(run("--root", tmp, "init"), 0)
-        self.assertTrue(os.path.isfile(os.path.join(tmp, ".pr-verify.yaml")))
-        self.assertEqual(run("--root", tmp, "init"), 2)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(run("--root", tmp, "init"), 0)
+            self.assertTrue(os.path.isfile(os.path.join(tmp, ".pr-verify.yaml")))
+            self.assertEqual(run("--root", tmp, "init"), 2)
 
     def test_check_human(self):
         tmp, BASE = make_pr_repo()
@@ -87,7 +89,8 @@ class TestCLI(unittest.TestCase):
         tmp, old_base = make_pr_repo()
         base = commit_at_new_base(
             tmp, old_base,
-            {".pr-verify.yaml": 'gates:\n  - "true"\n  - "false"\n'})
+            {".pr-verify.yaml": f"gates:\n  - {yaml_str(PASS_GATE)}\n"
+                                f"  - {yaml_str(FAIL_GATE)}\n"})
         buf = io.StringIO()
         with redirect_stdout(buf):
             code = run("--root", tmp, "check", "--base", base, "--format", "json")
@@ -103,10 +106,13 @@ class TestCLI(unittest.TestCase):
         # worktree and have it executed: gates load from the base ref only.
         tmp, old_base = make_pr_repo()
         base = commit_at_new_base(
-            tmp, old_base, {".pr-verify.yaml": 'gates:\n  - "true"\n'})
+            tmp, old_base,
+            {".pr-verify.yaml": f"gates:\n  - {yaml_str(PASS_GATE)}\n"})
         sentinel = os.path.join(tmp, "pwned-by-gate")
-        with open(os.path.join(tmp, ".pr-verify.yaml"), "w") as f:
-            f.write(f'gates:\n  - "touch {sentinel}"\n')
+        hostile = gate(PY, "-c", f"open({sentinel!r}, 'w').close()")
+        with open(os.path.join(tmp, ".pr-verify.yaml"), "w",
+                  encoding="utf-8") as f:
+            f.write(f"gates:\n  - {yaml_str(hostile)}\n")
         buf = io.StringIO()
         with redirect_stdout(buf):
             run("--root", tmp, "check", "--base", base, "--format", "json")
@@ -114,7 +120,7 @@ class TestCLI(unittest.TestCase):
         self.assertFalse(os.path.exists(sentinel),
                          "worktree gate config was executed!")
         self.assertEqual(len(data["gates"]), 1)
-        self.assertEqual(data["gates"][0]["command"], "true")
+        self.assertEqual(data["gates"][0]["command"], PASS_GATE)
         self.assertTrue(data["gates"][0]["passed"])
 
     def test_gate_shell_metachars_not_interpreted(self):
@@ -122,23 +128,29 @@ class TestCLI(unittest.TestCase):
         tmp, old_base = make_pr_repo()
         s1 = os.path.join(tmp, "metachar-1")
         s2 = os.path.join(tmp, "metachar-2")
+        mk1 = gate(PY, "-c", f"open({s1!r}, 'w').close()")
+        mk2 = gate(PY, "-c", f"open({s2!r}, 'w').close()")
+        # with a shell, `;` and `$()` would run mk1/mk2; without one they
+        # are literal extra arguments to a harmless `python -c pass`
         base = commit_at_new_base(tmp, old_base, {".pr-verify.yaml": (
             "gates:\n"
-            f'  - "echo pwned; touch {s1}"\n'
-            f'  - "echo $(touch {s2})"\n')})
+            f"  - {yaml_str(PASS_GATE + '; ' + mk1)}\n"
+            f"  - {yaml_str(PASS_GATE + ' $(' + mk2 + ')')}\n")})
         buf = io.StringIO()
         with redirect_stdout(buf):
             run("--root", tmp, "check", "--base", base, "--format", "json")
         data = json.loads(buf.getvalue())
         self.assertFalse(os.path.exists(s1))
         self.assertFalse(os.path.exists(s2))
-        # echo with literal args still exits 0 -> gates pass
+        # python -c pass with literal extra args still exits 0 -> gates pass
+        self.assertEqual(len(data["gates"]), 2)
         self.assertTrue(all(g["passed"] for g in data["gates"]))
 
     def test_failing_gate_exits_nonzero(self):
         tmp, old_base = make_pr_repo()
         base = commit_at_new_base(
-            tmp, old_base, {".pr-verify.yaml": 'gates:\n  - "false"\n'})
+            tmp, old_base,
+            {".pr-verify.yaml": f"gates:\n  - {yaml_str(FAIL_GATE)}\n"})
         buf = io.StringIO()
         with redirect_stdout(buf):
             code = run("--root", tmp, "check", "--base", base,
@@ -152,9 +164,11 @@ class TestCLI(unittest.TestCase):
         # Uncommitted working-tree changes (the Claude Code workflow) must
         # be verified too, not just committed diffs.
         tmp, BASE = make_pr_repo()
-        with open(os.path.join(tmp, "app/core.py"), "a") as f:
+        with open(os.path.join(tmp, "app/core.py"), "a", encoding="utf-8",
+                  newline="\n") as f:
             f.write("\n\ndef dirty_wip(x):\n    return x\n")
-        with open(os.path.join(tmp, "app/scratch.py"), "w") as f:
+        with open(os.path.join(tmp, "app/scratch.py"), "w", encoding="utf-8",
+                  newline="\n") as f:
             f.write("def s():\n    return 1\n")
         buf = io.StringIO()
         with redirect_stdout(buf):
@@ -222,6 +236,21 @@ class TestCLI(unittest.TestCase):
         self.assertIn("deleted", out)
         self.assertIn("high", out.lower())
         self.assertEqual(code, 1)
+
+    def test_report_survives_cp1252_console(self):
+        # Windows consoles often run cp1252 with errors="strict"; the box
+        # drawing and ✓/✗ marks used to raise UnicodeEncodeError. main()
+        # hardens the streams so they are replaced instead.
+        tmp, BASE = make_pr_repo()
+        raw = io.BytesIO()
+        strict = io.TextIOWrapper(raw, encoding="cp1252", errors="strict")
+        with redirect_stdout(strict):
+            code = run("--root", tmp, "check", "--base", BASE, "--skip-gates")
+            strict.flush()
+        self.assertEqual(code, 0)
+        text = raw.getvalue().decode("cp1252")
+        self.assertIn("PR VERIFY", text)
+        self.assertIn("score 57 < min-score 70", text)
 
     def test_version(self):
         buf = io.StringIO()

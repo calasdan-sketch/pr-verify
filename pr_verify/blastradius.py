@@ -4,6 +4,19 @@ Builds a module import graph for the repo (Python via AST, other languages
 via heuristic regex), inverts it, and for each changed file reports the
 transitive set of dependents — the code that could break if the change is
 wrong. Standalone: no dependency on sibling packages.
+
+Python import resolution (deterministic, no execution):
+  - absolute imports: `import a.b`, `from a.b import c` resolve to a/b.py
+    (or a/b/__init__.py) and, for `from a.b import c`, also to a/b/c.py
+    when c is a submodule rather than a name;
+  - relative imports: `from . import x`, `from ..core import y` are
+    resolved against the importing file's own package path, so a module
+    that is only reached through relative imports still shows up as a
+    dependent;
+  - layouts: a file is indexed under every dotted suffix of its path
+    (src/pkg/core.py -> src.pkg.core, pkg.core, core), so `src/` layouts,
+    namespace dirs and bare-name imports resolve. Over-approximating a
+    dependent is the safe direction for a trust tool.
 """
 
 from __future__ import annotations
@@ -25,23 +38,67 @@ _GENERIC_IMPORT_RES = [
 ]
 
 
-def _imports_of(path: str, content: str) -> list[str]:
+def _module_path(rel: str) -> list[str]:
+    """Dotted parts of a file's own module path: a/b/c.py -> [a, b, c];
+    a/b/__init__.py -> [a, b]."""
+    base = rel.replace(os.sep, "/")
+    if base.endswith("/__init__.py"):
+        base = base[: -len("/__init__.py")]
+    elif base == "__init__.py":
+        return []
+    elif base.endswith(".py"):
+        base = base[: -len(".py")]
+    return [p for p in base.split("/") if p]
+
+
+def _package_of(rel: str) -> list[str]:
+    """Dotted parts of the package a Python file belongs to (what a
+    single-dot relative import is resolved against)."""
+    parts = _module_path(rel)
+    if rel.replace(os.sep, "/").endswith("__init__.py"):
+        return parts          # a package's __init__ is the package itself
+    return parts[:-1]
+
+
+def _python_imports(rel: str, content: str) -> list[str]:
+    """Dotted names a Python file may depend on (absolute form)."""
+    try:
+        tree = ast.parse(content)
+    except (SyntaxError, ValueError):
+        return []
+    pkg = _package_of(rel)
+    mods: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            mods.extend(a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                # relative: climb (level - 1) packages from our own package
+                up = node.level - 1
+                if up > len(pkg):
+                    continue  # beyond the repo root: unresolvable
+                base = pkg[: len(pkg) - up] if up else list(pkg)
+                if node.module:
+                    base = base + node.module.split(".")
+                if not base:
+                    continue
+            else:
+                if not node.module:
+                    continue
+                base = node.module.split(".")
+            dotted = ".".join(base)
+            mods.append(dotted)
+            # `from pkg import mod` may name a submodule file: resolve it too
+            for alias in node.names:
+                if alias.name != "*":
+                    mods.append(f"{dotted}.{alias.name}")
+    return mods
+
+
+def _imports_of(path: str, content: str, rel: str | None = None) -> list[str]:
     ext = os.path.splitext(path)[1].lower()
     if ext in PY_EXTS:
-        try:
-            tree = ast.parse(content)
-        except SyntaxError:
-            return []
-        mods = []
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                mods.extend(a.name for a in node.names)
-            elif isinstance(node, ast.ImportFrom):
-                if node.level:
-                    mods.append("<local>")
-                elif node.module:
-                    mods.append(node.module)
-        return mods
+        return _python_imports(rel if rel is not None else path, content)
     if ext in OTHER_EXTS:
         mods = []
         for line in content.splitlines():
@@ -55,17 +112,17 @@ def _imports_of(path: str, content: str) -> list[str]:
 
 
 def _module_candidates(rel: str) -> list[str]:
-    """Dotted forms a file might be imported as: a/b.py -> a.b, b."""
+    """Dotted names a file might be imported as, most specific first:
+    src/pkg/core.py -> src.pkg.core, pkg.core, core (every dotted suffix,
+    so src/ layouts and bare-name imports resolve); a/b.py -> a.b, b."""
     base = rel.replace(os.sep, "/")
-    if base.endswith("/__init__.py"):
-        dotted = base[: -len("/__init__.py")].replace("/", ".")
-    elif base.endswith(".py"):
-        dotted = base[: -len(".py")].replace("/", ".")
+    if base.endswith(".py"):
+        parts = _module_path(base)
     else:
-        stem = base.rsplit(".", 1)[0].replace("/", ".")
-        return [stem, stem.split(".")[-1]]
-    parts = dotted.split(".")
-    return [dotted, parts[-1]] if len(parts) > 1 else [dotted]
+        parts = [p for p in base.rsplit(".", 1)[0].split("/") if p]
+    if not parts:
+        return []
+    return [".".join(parts[i:]) for i in range(len(parts))]
 
 
 @dataclasses.dataclass
@@ -108,7 +165,7 @@ def build_graph(root: str) -> dict[str, set[str]]:
                 content = f.read()
         except OSError:
             continue
-        for mod in _imports_of(path, content):
+        for mod in _imports_of(path, content, rel):
             target = index.get(mod)
             if target and target != rel:
                 graph[rel].add(target)
@@ -133,7 +190,7 @@ def dependents_of_modules(root: str, module_names: set[str]) -> list[str]:
                 content = f.read()
         except OSError:
             continue
-        if set(_imports_of(path, content)) & module_names:
+        if set(_imports_of(path, content, rel)) & module_names:
             out.append(rel)
     return sorted(out)
 

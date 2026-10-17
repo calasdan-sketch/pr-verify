@@ -31,7 +31,8 @@ import tempfile
 
 def _git(root: str, *args: str, env: dict | None = None) -> str:
     p = subprocess.run(["git", "-C", root, *args], capture_output=True,
-                       text=True, timeout=60, env=env)
+                       text=True, encoding="utf-8", errors="replace",
+                       timeout=60, env=env)
     if p.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed: {p.stderr.strip()[:200]}")
     return p.stdout
@@ -66,14 +67,16 @@ def snapshot_worktree(root: str) -> str | None:
             if p.returncode != 0:
                 return None
         p = subprocess.run(["git", "-C", root, "write-tree"], env=env,
-                           capture_output=True, text=True, timeout=60)
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=60)
         if p.returncode != 0:
             return None
         tree = p.stdout.strip()
         p = subprocess.run(
             ["git", "-C", root, "commit-tree", tree,
              "-p", head, "-m", "pr-verify: uncommitted worktree snapshot"],
-            env=env, capture_output=True, text=True, timeout=60)
+            env=env, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=60)
         if p.returncode != 0:
             return None
         return p.stdout.strip()
