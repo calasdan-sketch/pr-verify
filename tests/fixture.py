@@ -6,13 +6,41 @@ or color settings cannot leak in) and HOME/USERPROFILE point at a temp
 dir. Every commit sets its author explicitly.
 """
 
+import atexit
 import os
 import shlex
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 
-_GIT_HOME = tempfile.mkdtemp(prefix="prv-home-")
+
+def _rmtree(path: str) -> None:
+    """shutil.rmtree that copes with the read-only files git leaves (Windows)."""
+    def _writable(func, p, _exc):
+        try:
+            os.chmod(p, stat.S_IWRITE | stat.S_IREAD)
+            func(p)
+        except OSError:
+            pass
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=_writable)
+    else:
+        shutil.rmtree(path, onerror=_writable)
+
+
+# Everything the tests create (their repos, the fake home) goes under one
+# private directory that is removed when the test process ends, instead of
+# piling up in the shared temp directory.
+_BASE = tempfile.mkdtemp(prefix="prv-test-")
+tempfile.tempdir = _BASE
+for _var in ("TMPDIR", "TEMP", "TMP"):
+    os.environ[_var] = _BASE
+atexit.register(_rmtree, _BASE)
+
+_GIT_HOME = os.path.join(_BASE, "home")
+os.makedirs(_GIT_HOME)
 with open(os.path.join(_GIT_HOME, "gitconfig"), "w", encoding="utf-8") as _f:
     _f.write("[init]\n\tdefaultBranch = main\n")
 os.environ["GIT_CONFIG_GLOBAL"] = os.path.join(_GIT_HOME, "gitconfig")
