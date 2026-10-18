@@ -555,8 +555,11 @@ class TestReadmeAndGit(unittest.TestCase):
         self.assertNotIn("<repo>", readme)
         self.assertIn("pip install git+https://github.com/calasdan-sketch/pr-verify",
                       readme)
-        self.assertNotIn("pr-verify@main", readme)
-        self.assertIn("pr-verify@master", readme)
+        # The Action reference resolves against the GitHub repository, whose
+        # default branch is `main`; the working branch of a local clone
+        # (`master` here) is not what `uses:` sees.
+        self.assertNotIn("pr-verify@master", readme)
+        self.assertIn("pr-verify@main", readme)
 
     def test_missing_git_is_a_clean_error(self):
         err = io.StringIO()

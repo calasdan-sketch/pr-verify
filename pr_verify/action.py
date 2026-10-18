@@ -9,9 +9,10 @@ checkout, which is the working directory, can never supply a module.
 
 `exit-code` is written whichever way the step ends: 0 or 1 with the other
 three when a score was worked out, 2 alone when the check could not run (a
-check error, an input the CLI refuses, a root that is not a repository). A
-$GITHUB_OUTPUT that cannot be written is a warning, never a traceback: the
-verdict is the exit status, and it stands.
+check error, an input the CLI refuses, a root that is not a repository), 2
+with the other three when the score was worked out but the report could not
+be written. A $GITHUB_OUTPUT that cannot be written is a warning, never a
+traceback: the verdict is the exit status, and it stands.
 
 Mapping (input -> env var -> CLI flag), kept in INPUTS so the test suite
 can assert action.yml and the CLI agree:
@@ -118,16 +119,15 @@ def main(argv: list[str] | None = None, environ: dict | None = None) -> int:
         cli._eprint(f"error: {cli.error_text(e)}")
         write_outputs({"exit-code": 2}, env.get("GITHUB_OUTPUT"))
         return 2
-    with cli._stdout_may_close():
-        cli.render(result, args.format)
+    code = result.code if cli.write_report(result, args.format) else 2
     outputs = {
         "score": result.breakdown.score,
         "band": result.breakdown.band,
         "requires-review": str(result.breakdown.requires_review).lower(),
-        "exit-code": result.code,
+        "exit-code": code,
     }
     write_outputs(outputs, env.get("GITHUB_OUTPUT"))
-    return result.code
+    return code
 
 
 if __name__ == "__main__":

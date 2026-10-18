@@ -7,6 +7,7 @@ own gate config and get it executed on the reviewer's/CI machine.
 
 from __future__ import annotations
 
+import difflib
 import json
 import os
 import subprocess
@@ -138,10 +139,29 @@ def _as_int(key: str, val, lo: int | None, hi: int | None) -> int:
     return num
 
 
-def load(root: str, base: str) -> dict:
+def _unknown_setting(key, base: str) -> str:
+    """The warning for a key that is not a setting, with the setting it
+    looks like when there is one (`gate` -> `gates`, `risk_treshold` ->
+    `risk_threshold`; case aside, as the keys are matched exactly)."""
+    near = difflib.get_close_matches(
+        str(key).casefold(), list(DEFAULTS), n=1, cutoff=0.6)
+    guess = f" (did you mean {near[0]!r}?)" if near else ""
+    return f"{CONFIG_FILE} at {base}: unknown setting {key!r} is ignored{guess}"
+
+
+def load(root: str, base: str, warn=None) -> dict:
+    """The settings in force: DEFAULTS, then what the file at <base> says.
+
+    A key that is not a setting is not an error (a config that works must
+    keep working), but it does nothing, and a silent nothing is how a
+    `gate:` that was meant to fail the build never ran. Each one is
+    reported through `warn(message)`, if given, and left out of the result."""
     cfg = dict(DEFAULTS)
     for key, val in _read_base_config(root, base).items():
-        cfg[key] = val
+        if key in DEFAULTS:
+            cfg[key] = val
+        elif warn is not None:
+            warn(_unknown_setting(key, base))
     for key, (lo, hi) in _INT_FIELDS.items():
         cfg[key] = _as_int(key, cfg[key], lo, hi)
     for key in _LIST_FIELDS:

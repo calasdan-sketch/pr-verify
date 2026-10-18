@@ -27,14 +27,22 @@ pr-verify check           # base auto-detected: origin/HEAD, then main, master, 
 pr-verify check --base origin/main --format json --min-score 60
 ```
 
+`pr-verify init` will not overwrite a `.pr-verify.yaml` that is already there
+(it says so and exits 2); `pr-verify init --force` replaces it with the
+defaults.
+
 The report says which base was used (`base: master  (auto-detected)`); pass
-`--base <ref>` to choose. Without `git` on PATH or outside a repo the tool
-prints a one-line error and exits 2. So does a git call that fails or does
-not finish in time (60 seconds for the heavy ones, 15 for the small
-lookups): `error: git blame did not finish within 60 seconds`. So does a file
-that cannot be read or written (a full disk, a read-only repository for
-`init`). That is a run that could not verify, not the exit 1 of a failed
-verification.
+`--base <ref>` to choose. Without `git` on PATH, or for `check` outside a
+repo, the tool prints a one-line error and exits 2 (`init` needs `git` on
+PATH as well, but not a repo: outside one it writes its file in the folder
+you name). So does a git call that fails or does not finish in time (60
+seconds for the heavy ones, 15 for the small lookups): `error: git blame did
+not finish within 60 seconds`. So does a file that cannot be read or written
+(a full disk, a read-only repository for `init`), and a report that cannot be
+written (`pr-verify check > /dev/full`: `error: could not write the report:
+No space left on device`). That is a run that could not verify, not the exit
+1 of a failed verification. If it is stderr that cannot take the line (`2>
+/dev/full`), the line is lost and the exit status is still 2.
 
 The diff starts at the **merge-base** of the base and `HEAD`
 (`git merge-base`), not at the base's tip. When `main` moved on after your
@@ -170,20 +178,49 @@ report. `--format json` is exact — JSON escapes those characters itself, and
 a program reads the real name.
 
 **Blast radius** — reverse dependency graph: for each changed file, the
-transitive set of in-repo dependents that could break. Python via AST —
-absolute imports, relative imports (`from . import x`, `from ..core import
-y`, resolved against the importing file's own package), `from pkg import
-submodule`, and `src/` layouts (`src/pkg/core.py` answers to `pkg.core`);
-JS/TS/Go/Rust/Java/Ruby/PHP via heuristic fallback. Those file types are
-read from the worktree; `node_modules`, `vendor`, `build`, `dist`, `venv`,
-`.venv`, `.tox`, `__pycache__` and `.git` are skipped. Only regular files
-are opened, and none over 4 MiB: a symbolic link (a PR can commit `evil.py
--> /dev/zero`), a named pipe or a device is left alone, and a larger file
-stays in the graph without the imports it makes. A Python file the parser
-cannot read (a syntax error, or an expression nested or chained too deep for
-it) makes none either. The worktree is read once per run, however many files
-the PR deleted (each deleted file used to cost another full scan: 300 of
-them in a 2,000-file repository took minutes).
+transitive set of in-repo dependents that could break. Python,
+JavaScript/TypeScript, Ruby and Java are read, each by what its import lines
+say:
+
+- **Python** (`.py`), via AST: absolute imports, relative imports (`from .
+  import x`, `from ..core import y`, resolved against the importing file's
+  own package), `from pkg import submodule`, and `src/` layouts
+  (`src/pkg/core.py` answers to `pkg.core`).
+- **JavaScript and TypeScript** (`.js` `.jsx` `.ts` `.tsx` `.mjs` `.cjs`
+  `.mts` `.cts`): `import … from '…'`, `export … from '…'` (a clause that
+  runs over several lines is found at its closing `} from '…'`), `import
+  '…'`, `import('…')` and `require('…')`. A name that starts with `./` or
+  `../` is resolved against the directory of the file that imports it: `./b`
+  is `b.ts`, `b.tsx`, `b.d.ts`, `b.js`, `b.jsx`, `b.mjs`, `b.cjs`, `b.mts` or
+  `b.cts` there (each one that exists counts), or, when there is none,
+  `b/index.` and one of the same extensions (`./b/` is the directory only).
+  A name that already has an extension is that file, and `./b.js` also finds
+  `b.ts` or `b.tsx`, which is how TypeScript's ESM mode names the file it
+  compiles. Case must match. Not followed to a path: a package name, a
+  `baseUrl` path, a `tsconfig` `paths` alias (`@/lib/auth`) or a workspace
+  package; a name without a slash (`config`) finds the script of that file
+  name wherever it is in the repository.
+- **Ruby** (`.rb`): `require_relative`, relative to the requiring file. A
+  plain `require` depends on the load path and is not followed.
+- **Java** (`.java`): `import a.b.C;` and `import static a.b.C.m;` are the
+  file whose path ends in `a/b/C.java`, and `import a.b.*;` is every file
+  directly in a directory whose path ends in `a/b`. A class of the same
+  package needs no import and is not seen.
+
+Every other language (Go, Rust, PHP, C#, Kotlin and the rest) is not
+scanned: where an import points depends on `go.mod`, `Cargo.toml`,
+`composer.json` and the like, which are not read. A changed file of one says
+so in the report (`(.go files are not scanned for imports)`), it does not
+print a bare "0 downstream dependent(s)". The scanned file types are read
+from the worktree; `node_modules`, `vendor`, `build`, `dist`, `venv`,
+`.venv`, `.tox`, `__pycache__` and `.git` are skipped. Only regular files are
+opened, and none over 4 MiB: a symbolic link (a PR can commit `evil.py ->
+/dev/zero`), a named pipe or a device is left alone, and a larger file stays
+in the graph without the imports it makes. A Python file the parser cannot
+read (a syntax error, or an expression nested or chained too deep for it)
+makes none either. The worktree is read once per run, however many files the
+PR deleted (each deleted file used to cost another full scan: 300 of them in
+a 2,000-file repository took minutes).
 
 A changed file the graph does not contain says why, instead of a bare "0
 downstream dependent(s)". The JSON carries the same as a code in
@@ -192,7 +229,7 @@ downstream dependent(s)". The JSON carries the same as a code in
 | `scan` | Report | Meaning |
 |---|---|---|
 | `graph` | *(nothing)* | in the import graph |
-| `not_source` | `(.md files are not scanned for imports)` | a file type the scan does not read (README, YAML, logs …); no dependents are guessed for it |
+| `not_source` | `(.md files are not scanned for imports)` | a file type the scan does not read (README, YAML, logs, Go, Rust, PHP …); no dependents are guessed for it |
 | `skipped_dir` | `(in vendor/, which the import scan skips; nothing in-repo imports it)` | on disk, under a skipped directory |
 | `not_in_worktree` | `(not in the worktree; nothing in-repo imports it)` | deleted, or absent from the checked-out tree |
 | `not_scanned` | `(not reached by the import scan; nothing in-repo imports it)` | on disk, but the walk never reached it |
@@ -314,6 +351,20 @@ maps (`{...}`), multi-line (`|`, `>`) scalars and a key given twice. So is a
 file that is not a mapping of settings, a bare list for one. Each is exit 2
 with one `error:` line that names the file and, for a YAML problem, the line.
 
+The settings are `agent_markers`, `sensitive_paths`, `gates`,
+`risk_threshold` and `timeout`. A key that is none of them is not an error
+(a file that works keeps working), but it does nothing, and a `gate:` that
+was meant to fail the build must not pass for want of an `s`. So each one is
+named on stderr, with the setting it looks like when there is one:
+
+```
+warning: .pr-verify.yaml at <base>: unknown setting 'gate' is ignored (did you mean 'gates'?)
+```
+
+`<base>` is the base ref the file was read from. Keys are matched exactly, so
+`Gates:` is unknown too. The check goes on as if the line were not in the file:
+the report, its format and the exit status are what they would be without it.
+
 ## CI
 
 ```bash
@@ -331,12 +382,12 @@ human format says `no added lines in main..HEAD — nothing to verify`.
 
 `action.yml` at the repo root is a composite action. Its inputs are the
 `check` flags, same names without the dashes, same defaults. This repo's
-default branch is `master`; pin to it (or to a tag once one exists):
+default branch is `main`; pin to it (or to a tag once one exists):
 
 ```yaml
 - uses: actions/checkout@v4
   with: { fetch-depth: 0 }
-- uses: calasdan-sketch/pr-verify@master
+- uses: calasdan-sketch/pr-verify@main
   with:
     base: origin/main      # --base (empty = auto-detect; be explicit in CI)
     head: HEAD             # --head
@@ -370,6 +421,11 @@ Windows the launcher also stops the working directory from being searched
 for `git.exe` and other programs by bare name.
 
 ## Example output
+
+This is what `pr-verify check` prints for the small repository that
+`make_pr_repo()` in `tests/fixture.py` builds (a human commit on `main`; on a
+branch, another human commit and an agent commit). A test runs it again and
+compares, so the output below cannot drift from the code:
 
 ```
 ════════════════════════════════════════════════════════
@@ -421,7 +477,22 @@ for `git.exe` and other programs by bare name.
   the attribution: they read as human. And a base line that an agent
   removed and someone put back can still count for the agent, so the
   agent's removal count is an upper bound.
-- Non-Python blast-radius extraction is heuristic.
+- Who took a line out of the base is worked out with one `git blame` for
+  each agent commit and each file it took lines out of (a commit that
+  starts at the base needs none), and the calls share nothing, since each
+  reads a different parent. So the time grows with the number of such
+  pairs: on a busy two-core machine 50 agent commits that each rewrote a
+  line of the same eight files took about 4 seconds and 200 took about 14,
+  where the same pull request by a human took under half a second. The
+  time limit on a git call (below) is per call, not for the whole run.
+- The blast radius reads import lines; it runs no compiler and no bundler.
+  A dependent it cannot see is a dependent missing from the score: a name
+  built at run time, a `tsconfig` alias or `baseUrl` path, a workspace
+  package name, Ruby's plain `require`, a Java class used from its own
+  package, and everything in a language that is not scanned. Where it errs
+  the other way, it adds: a name without a slash matches a script of that
+  name anywhere, a `require('./x')` in a comment still counts, and each of
+  `b.ts`, `b.js` and `b.d.ts` counts as what `./b` means.
 - The blast radius does not follow symbolic links and reads no source file
   larger than 4 MiB for its imports (such a file is still in the graph and
   still has dependents).
@@ -454,7 +525,8 @@ python3 -m unittest discover -s tests   # or: python3 -m pytest -q
 
 Both runners, no network. Fixtures are throwaway git repos; the suite
 covers provenance (including a Greek filename and the marker false
-positives), src-layout/relative-import blast radius, the gate at its
+positives), src-layout/relative-import blast radius, JavaScript/TypeScript,
+Ruby and Java import resolution, the gate at its
 boundary values, policy gates without a shell (string and list form, the
 Windows split rules via a monkeypatched `os.name`), base detection on
 main/master/origin-HEAD repos, the tracked-only snapshot, `action.yml`

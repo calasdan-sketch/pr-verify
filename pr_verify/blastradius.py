@@ -1,9 +1,11 @@
 """Blast radius: who depends on the changed files?
 
-Builds a module import graph for the repo (Python via AST, other languages
-via heuristic regex), inverts it, and for each changed file reports the
-transitive set of dependents — the code that could break if the change is
-wrong. Standalone: no dependency on sibling packages.
+Builds a module import graph for the repo (Python via AST; JavaScript,
+TypeScript, Java and Ruby by reading their import lines), inverts it, and for
+each changed file reports the transitive set of dependents — the code that
+could break if the change is wrong. Other languages are not scanned: a
+changed file of one says so (scan "not_source"), it does not claim "0
+dependents". Standalone: no dependency on sibling packages.
 
 Python import resolution (deterministic, no execution):
   - absolute imports: `import a.b`, `from a.b import c` resolve to a/b.py
@@ -18,6 +20,25 @@ Python import resolution (deterministic, no execution):
     namespace dirs and bare-name imports resolve. Over-approximating a
     dependent is the safe direction for a trust tool.
 
+JavaScript and TypeScript (.js .jsx .ts .tsx .mjs .cjs .mts .cts): the module
+names are the ones written in `import ... from`, `export ... from`,
+`import '...'`, `import('...')` and `require('...')`, one line at a time (a
+clause that spans lines is found at its last line, `} from '...'`). A name
+that starts with ./ or ../ (or is . or ..) is resolved against the directory
+of the importing file: with an extension it is that file, and a .js/.jsx/
+.mjs/.cjs name also finds the .ts/.tsx/.mts/.cts source TypeScript compiles
+it from; without one every file of that name with one of the script
+extensions (and .d.ts) counts, or, when there is none, the index file of
+the directory of that name. Anything else (a package, a baseUrl path, a
+tsconfig alias) is not followed to a path: only a name that is the file name
+of a script, without its extension, finds that script, wherever it is.
+
+Ruby (.rb): `require_relative 'x'` is x.rb, relative to the requiring file.
+Java (.java): `import a.b.C;` (also `import static a.b.C.m;`) is the file whose
+path ends in a/b/C.java, and `import a.b.*;` is every file directly in a
+directory whose path ends in a/b. What needs no import (a class of the same
+Java package) is not seen.
+
 The worktree is read ONCE per run (_scan): the graph and the dependents of
 every deleted file are both worked out from that one pass. And only regular
 files are opened, and only up to MAX_SOURCE_BYTES: a pull request can bring a
@@ -29,12 +50,19 @@ from __future__ import annotations
 import ast
 import dataclasses
 import os
+import posixpath
 import re
 import stat
 
 PY_EXTS = {".py"}
-OTHER_EXTS = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
-              ".go", ".rs", ".java", ".rb", ".php"}
+#: JavaScript and TypeScript, in every spelling of the extension.
+JS_EXTS = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"}
+#: The other file types whose imports are read: those of a language whose
+#: import names a path by itself (Java: package = directory; Ruby:
+#: require_relative). Go, Rust, PHP and the rest need the build's configuration
+#: (go.mod, Cargo.toml, composer.json) to say where an import points, and are
+#: not scanned.
+OTHER_EXTS = JS_EXTS | {".java", ".rb"}
 #: File types whose imports are read; nothing else is in the graph.
 SCANNED_EXTS = PY_EXTS | OTHER_EXTS
 #: Directories the scan never enters.
@@ -45,12 +73,28 @@ SKIP_DIRS = frozenset({".git", "node_modules", "__pycache__", ".venv", "venv",
 #: with nothing that it imports. The read itself stops one byte past this.
 MAX_SOURCE_BYTES = 4 * 1024 * 1024
 
-_GENERIC_IMPORT_RES = [
-    re.compile(r'^\s*import\s+(?:type\s+)?[{*]?[^"\']*?from\s+["\']([^"\']+)["\']'),
-    re.compile(r'^\s*import\s+["\']([^"\']+)["\']'),
-    re.compile(r'require\(\s*["\']([^"\']+)["\']\s*\)'),
-    re.compile(r'^\s*use\s+([a-zA-Z0-9_:]+)(?:::|\s*[{;])'),
-]
+#: The ways a line of JavaScript or TypeScript names a module. Each is tried on
+#: one line at a time, and none of them can be made to rescan a line from many
+#: starting points: reading a file stays linear in its size, however a pull
+#: request writes it (a test feeds them the shapes that would not).
+_JS_IMPORT_RES = (
+    # import x from 'm' | import {a} from "m" | export * from 'm' | export {a} from 'm'
+    re.compile(r'^\s*(?:import|export)\b[^\'"`]*?\bfrom\s*["\']([^"\']+)["\']'),
+    # the last line of an import or export clause that began above: } from 'm'
+    re.compile(r'^\s*\}\s*from\s*["\']([^"\']+)["\']'),
+    # import 'm'
+    re.compile(r'^\s*import\s*["\']([^"\']+)["\']'),
+    # import('m')
+    re.compile(r'\bimport\s*\(\s*["\']([^"\']+)["\']\s*\)'),
+    # require('m')
+    re.compile(r'\brequire\s*\(\s*["\']([^"\']+)["\']\s*\)'),
+)
+_RUBY_IMPORT_RE = re.compile(
+    r'^\s*require_relative\b\s*\(?\s*["\']([^"\']+)["\']')
+#: import a.b.C; | import static a.b.C.m; | import a.b.*;
+_JAVA_IMPORT_RE = re.compile(
+    r'^\s*import\s+(?:static\s+)?'
+    r'([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*(?:\.\*)?)\s*;')
 
 
 def _module_path(rel: str) -> list[str]:
@@ -117,13 +161,12 @@ def _imports_of(path: str, content: str, rel: str | None = None) -> list[str]:
     if ext in PY_EXTS:
         return _python_imports(rel if rel is not None else path, content)
     if ext in OTHER_EXTS:
+        regexes = (_JS_IMPORT_RES if ext in JS_EXTS else
+                   (_RUBY_IMPORT_RE,) if ext == ".rb" else (_JAVA_IMPORT_RE,))
         mods = []
         for line in content.splitlines():
-            for rx in _GENERIC_IMPORT_RES:
-                m = rx.search(line)
-                if m:
-                    mods.append(m.group(1))
-                    break
+            for rx in regexes:
+                mods.extend(m.group(1) for m in rx.finditer(line))
         return mods
     return []
 
@@ -140,6 +183,97 @@ def _module_candidates(rel: str) -> list[str]:
     if not parts:
         return []
     return [".".join(parts[i:]) for i in range(len(parts))]
+
+
+#: Extensions a JavaScript/TypeScript import may leave out, and the index
+#: files of a directory with them.
+_JS_RESOLVE_EXTS = (".ts", ".tsx", ".d.ts", ".js", ".jsx", ".mjs", ".cjs",
+                    ".mts", ".cts")
+#: TypeScript's ESM way to name a file: `import './b.js'` is b.ts (or b.tsx),
+#: the file the compiler turns into b.js.
+_TS_SOURCES = {".js": (".ts", ".tsx"), ".jsx": (".tsx",),
+               ".mjs": (".mts",), ".cjs": (".cts",)}
+
+
+def _ext(rel: str) -> str:
+    return posixpath.splitext(rel)[1].lower()
+
+
+def _beside(importer: str, spec: str) -> str:
+    """`spec`, a path relative to the directory of `importer` (a repo-relative
+    path), as a path from the repository root. One that leaves the repository
+    starts with ../ (or is absolute) and so is the path of no file in it."""
+    return posixpath.normpath(posixpath.join(posixpath.dirname(importer), spec))
+
+
+def _js_wants(importer: str, spec: str) -> list[list[str]]:
+    """The files a JavaScript/TypeScript specifier may mean, as groups in
+    order of preference: the first group that has a file in the repository is
+    the import. Only ./ and ../ names (and . and ..) are paths."""
+    if spec not in (".", "..") and not spec.startswith(("./", "../")):
+        return []
+    base = _beside(importer, spec)
+    prefix = "" if base == "." else base + "/"
+    index = [prefix + "index" + e for e in _JS_RESOLVE_EXTS]
+    if spec.endswith("/"):          # './lib/' is the directory, as in Node
+        return [index]
+    stem, ext = posixpath.splitext(base)
+    files: list[str] = []
+    if ext.lower() in JS_EXTS:
+        files.append(base)
+        files.extend(stem + src for src in _TS_SOURCES.get(ext.lower(), ()))
+    files.extend(base + e for e in _JS_RESOLVE_EXTS)
+    return [files, index]
+
+
+def _ruby_wants(importer: str, spec: str) -> list[list[str]]:
+    base = _beside(importer, spec)
+    return [[base if base.endswith(".rb") else base + ".rb"]]
+
+
+def _java_wants(spec: str) -> list[list[str]]:
+    """a.b.C -> the class a.b.C; a.b.C.m (a static import) or a.b.C.D (a
+    nested class) -> the longest of those that is a class; a.b.* -> the
+    package a.b, or else the class a.b (a static wildcard). Never the first
+    word alone: of org.junit.Assert that would be any file called org.java."""
+    if spec.endswith(".*"):
+        package = spec[:-2]
+        groups = [["javadir:" + package]]
+        if "." in package:
+            groups.append(["java:" + package])
+        return groups
+    parts = spec.split(".")
+    return [["java:" + ".".join(parts[:n])] for n in range(len(parts), 1, -1)]
+
+
+def _wants(importer: str, spec: str) -> list[list[str]]:
+    """Lookup keys (see _keys) of the files the import `spec` of `importer`
+    may mean, in groups of descending preference. Python is not here: its
+    names go through the dotted index."""
+    ext = _ext(importer)
+    if ext in JS_EXTS:
+        return _js_wants(importer, spec)
+    if ext == ".rb":
+        return _ruby_wants(importer, spec)
+    if ext == ".java":
+        return _java_wants(spec)
+    return []
+
+
+def _keys(rel: str) -> list[str]:
+    """The lookup keys a file answers to for the imports of _wants: itself
+    (JavaScript, Ruby), or every dotted suffix of its path as a class and of
+    its directory as a package (Java)."""
+    ext = _ext(rel)
+    if ext in JS_EXTS or ext == ".rb":
+        return [rel]
+    if ext == ".java":
+        parts = [p for p in rel.rsplit(".", 1)[0].split("/") if p]
+        package = parts[:-1]
+        return (["java:" + ".".join(parts[i:]) for i in range(len(parts))] +
+                ["javadir:" + ".".join(package[i:])
+                 for i in range(len(package))])
+    return []
 
 
 @dataclasses.dataclass
@@ -237,15 +371,34 @@ def _graph(rels: list[str],
     """rel path -> set of rel paths it imports (in-repo only)."""
     # index: dotted name -> rel
     index: dict[str, str] = {}
+    scripts: dict[str, str] = {}     # script file name (no extension) -> rel
+    by_key: dict[str, list[str]] = {}
     for rel in rels:
         for cand in _module_candidates(rel):
             index.setdefault(cand, rel)
+        if _ext(rel) in JS_EXTS:
+            scripts.setdefault(
+                posixpath.splitext(posixpath.basename(rel))[0], rel)
+        for key in _keys(rel):
+            by_key.setdefault(key, []).append(rel)
     graph: dict[str, set[str]] = {rel: set() for rel in rels}
     for rel in rels:
+        ext = _ext(rel)
         for mod in imports[rel]:
-            target = index.get(mod)
-            if target and target != rel:
-                graph[rel].add(target)
+            if ext in PY_EXTS:
+                found = [index[mod]] if mod in index else []
+            else:
+                found = []
+                groups = _wants(rel, mod)
+                for group in groups:
+                    found = [t for key in group for t in by_key.get(key, ())]
+                    if found:
+                        break
+                if not groups and ext in JS_EXTS and mod in scripts:
+                    # a name without ./ : a package, an alias ... or a script
+                    # of that name somewhere in the repository
+                    found = [scripts[mod]]
+            graph[rel].update(t for t in found if t != rel)
     return graph
 
 
@@ -265,6 +418,20 @@ def _importing(importers: dict[str, set[str]],
     for name in module_names:
         found.update(importers.get(name, ()))
     return sorted(found)
+
+
+def _wanting(imports: dict[str, list[str]]) -> dict[str, set[str]]:
+    """Lookup key (see _keys) -> the files that import something that may
+    mean it, in any group. The graph has only files that exist; this is how
+    a file that does not exist any more (deleted) finds the files that still
+    import it."""
+    out: dict[str, set[str]] = {}
+    for rel, mods in imports.items():
+        for mod in mods:
+            for group in _wants(rel, mod):
+                for key in group:
+                    out.setdefault(key, set()).add(rel)
+    return out
 
 
 def build_graph(root: str) -> dict[str, set[str]]:
@@ -309,6 +476,7 @@ def analyze(root: str, changed: list[str]) -> dict[str, BlastRadius]:
     for src, deps in graph.items():
         for dep in deps:
             reverse[dep].add(src)
+    wanting: dict[str, set[str]] | None = None   # worked out when needed
     result: dict[str, BlastRadius] = {}
     for rel in changed:
         if rel in reverse:
@@ -324,8 +492,17 @@ def analyze(root: str, changed: list[str]) -> dict[str, BlastRadius]:
         # imported has a module name: config.yaml is not the module
         # `config`, so it gets no guessed dependents.
         scan = _scan_status(root, rel)
-        direct = ([] if scan == "not_source" else
-                  _importing(importers, set(_module_candidates(rel))))
+        if scan == "not_source":
+            direct = []
+        else:
+            found = set(_importing(importers, set(_module_candidates(rel))))
+            keys = _keys(rel)
+            if keys:
+                if wanting is None:
+                    wanting = _wanting(imports)
+                for key in keys:
+                    found |= wanting.get(key, set())
+            direct = sorted(found)
         transitive = _transitive_dependents(reverse, direct, rel)
         result[rel] = BlastRadius(file=rel, direct=direct,
                                   transitive=transitive,

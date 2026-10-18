@@ -8,6 +8,10 @@ on:
   push:
   pull_request:
 
+# The tests only read the repository: the token gets no more than that.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: ${{ matrix.os }} / py${{ matrix.python }}

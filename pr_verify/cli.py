@@ -11,9 +11,9 @@ that tells a senior how deep to review.
 
 Exit status: 1 when the score fails the gate (score >= min-score, see
 --min-score / --fail-on) or any policy gate fails; 2 on usage/config
-errors and when git fails or does not answer in time (nothing was
-verified); 0 otherwise. A reader that stops early (`| head -1`) cuts the
-report short but never changes it.
+errors, when git fails or does not answer in time (nothing was verified)
+and when a file or the report cannot be written; 0 otherwise. A reader that
+stops early (`| head -1`) cuts the report short but never changes it.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from . import gates as gates_mod
 from . import provenance as prov_mod
 from . import risk as risk_mod
 
-VERSION = "0.1.2"
+VERSION = "0.1.3"
 
 #: Tried in order when --base is not given (after origin/HEAD).
 BASE_CANDIDATES = ("main", "master", "origin/main", "origin/master")
@@ -182,14 +182,14 @@ def error_text(exc: BaseException) -> str:
 
 
 def _eprint(message: str) -> None:
-    """A message on stderr, whose reader can go away too (`2>&1 | head -1`):
-    the exit status that goes with the message (2) must survive that."""
+    """A message on stderr, whose reader can go away too (`2>&1 | head -1`)
+    and whose file can be on a full disk: the exit status that goes with the
+    message (2) must survive that. There is nowhere else to say it, so a
+    message stderr will not take is dropped."""
     try:
         print(_one_line(message), file=sys.stderr)
         sys.stderr.flush()
-    except OSError as e:
-        if not _is_closed_pipe(e):
-            raise
+    except OSError:
         _discard(sys.stderr)
 
 
@@ -217,17 +217,31 @@ def _stdout_may_close():
         _flush_stdout()
 
 
+def _git_would_not_start(exc: BaseException) -> None:
+    """One `error:` line and exit 2: git could not be started at all."""
+    if isinstance(exc, FileNotFoundError):
+        _eprint("error: git not found on PATH — pr-verify needs the git "
+                "command line tool (https://git-scm.com/downloads)")
+    else:
+        _eprint(f"error: could not run git: {error_text(exc)}")
+    sys.exit(2)
+
+
+def _ensure_git() -> None:
+    """Exit 2 with one line unless git can be started (it need not be in a
+    repository: `init` writes its file anywhere)."""
+    try:
+        subprocess.run(["git", "--version"], capture_output=True, timeout=15)
+    except (OSError, subprocess.SubprocessError) as e:
+        _git_would_not_start(e)
+
+
 def _ensure_repo(root: str) -> None:
     try:
         p = subprocess.run(["git", "-C", root, "rev-parse", "--git-dir"],
                            capture_output=True, timeout=15)
-    except FileNotFoundError:
-        _eprint("error: git not found on PATH — pr-verify needs the git "
-                "command line tool (https://git-scm.com/downloads)")
-        sys.exit(2)
     except (OSError, subprocess.SubprocessError) as e:
-        _eprint(f"error: could not run git: {error_text(e)}")
-        sys.exit(2)
+        _git_would_not_start(e)
     if p.returncode != 0:
         _eprint("error: not a git repo")
         sys.exit(2)
@@ -290,6 +304,7 @@ def detect_base(root: str) -> str | None:
 
 
 def cmd_init(args) -> int:
+    _ensure_git()       # before anything is written: no file, then no error
     # The config is read from the base ref's top level, so that is where it
     # belongs, also when started in (or pointed at) a subdirectory.
     root = repo_root(args.root)
@@ -306,7 +321,11 @@ def cmd_init(args) -> int:
     except OSError as e:
         _eprint(f"error: could not write {path}: {e.strerror or e}")
         return 2
-    base = detect_base(root) or "your base branch"
+    try:
+        base = detect_base(root)
+    except (OSError, subprocess.SubprocessError):
+        base = None     # only the name of the branch for the note is lost
+    base = base or "your base branch"
     with _stdout_may_close():
         _out(f"wrote {config_mod.CONFIG_FILE}{where} — tune markers, "
              f"paths, gates.")
@@ -495,7 +514,8 @@ def run_check(args) -> CheckResult:
         raise RuntimeError(f"base ref {base!r} does not exist — pass --base "
                            f"<ref> (tried as given; detection would use: "
                            f"{detect_base(root) or 'nothing found'})")
-    cfg = config_mod.load(root, base)
+    cfg = config_mod.load(root, base,
+                          warn=lambda msg: _eprint("warning: " + msg))
     min_score = resolve_min_score(args.fail_on, args.min_score,
                                   cfg["risk_threshold"])
     note = _config_note(root, base)
@@ -608,6 +628,24 @@ def render(result: CheckResult, fmt: str) -> None:
         _report_human(result)
 
 
+def write_report(result: CheckResult, fmt: str) -> bool:
+    """Print the report. A reader that went away is not an error and does not
+    change the verdict (see _stdout_may_close). A report that cannot be
+    written is one: a full disk behind `> report.json` is a run that could not
+    deliver what it was asked for, one `error:` line and False (exit 2, not
+    the 1 of a failed verification). What is still buffered is dropped:
+    Python would try to write it again on its way out and end with status 120.
+    """
+    try:
+        with _stdout_may_close():
+            render(result, fmt)
+    except OSError as e:
+        _discard(sys.stdout)
+        _eprint(f"error: could not write the report: {e.strerror or e}")
+        return False
+    return True
+
+
 def cmd_check(args) -> int:
     _ensure_repo(args.root)
     try:
@@ -615,8 +653,8 @@ def cmd_check(args) -> int:
     except CHECK_ERRORS as e:
         _eprint(f"error: {error_text(e)}")
         return 2
-    with _stdout_may_close():
-        render(result, args.format)
+    if not write_report(result, args.format):
+        return 2
     return result.code
 
 
@@ -661,7 +699,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     i = sub.add_parser("init", help="Write example .pr-verify.yaml.")
-    i.add_argument("--force", action="store_true")
+    i.add_argument("--force", action="store_true",
+                   help="Overwrite a .pr-verify.yaml that is already there "
+                        "(without it init leaves the file alone and exits "
+                        "2).")
 
     c = sub.add_parser("check", help="Verify a diff range.")
     c.add_argument("--base", default=None,
@@ -696,11 +737,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     _harden_streams()
-    # --help and --version print here and exit. argparse ignores a failed
-    # write, so a closed pipe would only show at the flush on the way out.
-    with _stdout_may_close():
-        args = build_parser().parse_args(argv)
-    return {"init": cmd_init, "check": cmd_check}[args.cmd](args)
+    try:
+        # --help and --version print here and exit. argparse ignores a failed
+        # write, so a closed pipe would only show at the flush on the way out.
+        with _stdout_may_close():
+            args = build_parser().parse_args(argv)
+        return {"init": cmd_init, "check": cmd_check}[args.cmd](args)
+    except OSError as e:
+        # What the commands did not take care of themselves: a file or a
+        # stream the operating system refused (a full disk behind `> file`).
+        # A closed pipe never gets here, it is absorbed where it happens. It
+        # is a run that could not do its job, not a failed verification.
+        _discard(sys.stdout)
+        _eprint(f"error: {e.strerror or e}")
+        return 2
 
 
 if __name__ == "__main__":

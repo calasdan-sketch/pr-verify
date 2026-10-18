@@ -950,15 +950,22 @@ class TestBrokenPipe(unittest.TestCase):
                                        "exit-code": "1"})
 
     def test_other_write_errors_are_not_swallowed(self):
+        # not swallowed like a closed pipe, whose reader just went away and
+        # which leaves the verdict alone: a report that cannot be written is
+        # an error (round 7: one line and exit 2; it used to be a traceback)
         class DiskFull(io.StringIO):
             def write(self, s):
                 raise OSError(errno.ENOSPC, "No space left on device")
 
         tmp, base = make_pr_repo()
-        with redirect_stdout(DiskFull()), self.assertRaises(OSError) as cm:
-            cli_mod.main(["--root", tmp, "check", "--base", base,
-                          "--skip-gates"])
-        self.assertEqual(cm.exception.errno, errno.ENOSPC)
+        err = io.StringIO()
+        with redirect_stdout(DiskFull()), redirect_stderr(err):
+            code = cli_mod.main(["--root", tmp, "check", "--base", base,
+                                 "--skip-gates"])
+        self.assertEqual(code, 2)
+        self.assertEqual(err.getvalue().strip(),
+                         "error: could not write the report: "
+                         "No space left on device")
 
     def test_closed_pipe_errno_per_platform(self):
         epipe = BrokenPipeError(errno.EPIPE, "Broken pipe")
@@ -1422,14 +1429,19 @@ class TestClosedPipeOnWindows(unittest.TestCase):
             self.assertSettled(pipe)
 
     def test_einval_is_a_real_error_anywhere_else(self):
+        # not a closed pipe, so not absorbed: reported, and exit 2 (round 7;
+        # it used to be an OSError that ended the run in a traceback)
         for unbuffered in (False, True):
             pipe = self.pipe(unbuffered)
             with self.subTest(unbuffered=unbuffered):
-                with self.assertRaises(OSError) as cm:
-                    self.run_main(["--root", self.tmp, "check", "--base",
-                                   self.base, "--skip-gates"], pipe,
-                                  windows=False)
-                self.assertEqual(cm.exception.errno, errno.EINVAL)
+                err = io.StringIO()
+                code = self.run_main(["--root", self.tmp, "check", "--base",
+                                      self.base, "--skip-gates"], pipe, err,
+                                     windows=False)
+                self.assertEqual(code, 2)
+                self.assertEqual(err.getvalue().strip(),
+                                 "error: could not write the report: "
+                                 "Invalid argument")
 
     def test_help_and_version(self):
         # argparse ignores a failed write and exits: the flush that fails
