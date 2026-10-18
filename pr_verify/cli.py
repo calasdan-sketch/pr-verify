@@ -33,15 +33,18 @@ from . import gates as gates_mod
 from . import provenance as prov_mod
 from . import risk as risk_mod
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 
 #: Tried in order when --base is not given (after origin/HEAD).
 BASE_CANDIDATES = ("main", "master", "origin/main", "origin/master")
 
 #: What stops a check before it has a verdict (exit 2, never 1): a bad config
-#: or ref, a git that failed (RuntimeError, ValueError), or a git call that
-#: outlived its timeout (subprocess.TimeoutExpired is a SubprocessError).
-CHECK_ERRORS = (RuntimeError, ValueError, subprocess.SubprocessError)
+#: or ref, a git that failed (RuntimeError, ValueError), a git call that
+#: outlived its timeout (subprocess.TimeoutExpired is a SubprocessError), or
+#: a file or process the OS refused (OSError: a full disk, no permission, a
+#: program that could not be started). run_check writes nothing to our own
+#: streams, so a closed pipe is never one of these.
+CHECK_ERRORS = (RuntimeError, ValueError, subprocess.SubprocessError, OSError)
 
 #: git options that take the next word as their value
 _GIT_OPTIONS_WITH_VALUE = frozenset({"-c", "-C", "--git-dir", "--work-tree"})
@@ -297,8 +300,12 @@ def cmd_init(args) -> int:
         with _stdout_may_close():
             _out(f"{config_mod.CONFIG_FILE} exists{where} (use --force).")
         return 2
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(config_mod.example_config())
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(config_mod.example_config())
+    except OSError as e:
+        _eprint(f"error: could not write {path}: {e.strerror or e}")
+        return 2
     base = detect_base(root) or "your base branch"
     with _stdout_may_close():
         _out(f"wrote {config_mod.CONFIG_FILE}{where} — tune markers, "

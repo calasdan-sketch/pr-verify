@@ -31,8 +31,10 @@ The report says which base was used (`base: master  (auto-detected)`); pass
 `--base <ref>` to choose. Without `git` on PATH or outside a repo the tool
 prints a one-line error and exits 2. So does a git call that fails or does
 not finish in time (60 seconds for the heavy ones, 15 for the small
-lookups): `error: git blame did not finish within 60 seconds`. That is a run
-that could not verify, not the exit 1 of a failed verification.
+lookups): `error: git blame did not finish within 60 seconds`. So does a file
+that cannot be read or written (a full disk, a read-only repository for
+`init`). That is a run that could not verify, not the exit 1 of a failed
+verification.
 
 The diff starts at the **merge-base** of the base and `HEAD`
 (`git merge-base`), not at the base's tip. When `main` moved on after your
@@ -69,11 +71,17 @@ commit that wrote it: for each file that lost lines, the commits of the
 range that touched it are looked at, and the lines an agent commit removed
 are the agent's (`files.<name>.removed` / `agent_removed` in the JSON,
 `4/4 removed agent` in the report). An agent that only deletes four lines
-of `auth.py` is no longer "nothing to verify". The agent's removals in a
-file never exceed what the range removes from it in total, so lines an
-agent added and took out again do not count, and the figure is an upper
-bound when agent commits remove each other's lines. A whole deleted file
-keeps its own `deletion` factor and is not counted in lines.
+of `auth.py` is no longer "nothing to verify". Only a line the base
+already had counts: `git blame` of the commit's parent, limited to the PR's
+own commits, says whether a removed line was written inside the PR. Lines
+an agent added and took out again, or a human's new lines it removes, are
+no removal, and a human's removals stay human next to an agent's churn. The
+agent's removals in a file never exceed what the PR removes from it in
+total. Two things stay approximate: a base line an agent removed and
+someone put back still counts for the agent while the file lost other base
+lines, and removals from a file that is renamed later in the PR read as
+human. A whole deleted file keeps its own `deletion` factor and is not
+counted in lines.
 
 A submodule is a commit id, not a file, so there is nothing to blame in it:
 moving one is a single added line (and a single removed one), credited to
@@ -136,7 +144,9 @@ it. It comes from git's plumbing (`git diff-tree`), which ignores
 repository's `.gitattributes` is left out of it: a PR cannot hide a source
 file from the gate by adding `*.py binary` or `*.py -diff`, and `diff`
 cannot turn a real binary into a pile of added lines. `git blame` ignores
-a `blame.ignoreRevsFile` for the same reason (that file is in the PR too).
+a `blame.ignoreRevsFile` for the same reason (that file is in the PR too),
+also one that names a file that is not there (`--no-ignore-revs-file`; a git
+without that option may still stop on such a setting, with its own message).
 
 `--base` and `--head` name commits, and a name that starts with `-` is
 refused before git sees it (`error: head ref '--output=FILE' does not
@@ -284,6 +294,26 @@ committed to your base branch: `init` says so, the report prints a note
 when the worktree copy differs from (or does not exist at) the base, and
 the file itself is excluded from provenance and scoring.
 
+`.pr-verify.yaml` is read as UTF-8, and a byte-order mark in front of it
+(Notepad's "UTF-8", PowerShell's `Set-Content -Encoding utf8`) is fine. UTF-16
+text (what PowerShell's `>` writes) is refused, and says so. The YAML is the
+small subset of a built-in reader: `key: value` pairs, plain or quoted
+scalars, `[a, b]` lists, and block lists whose list items are indented under
+their key:
+
+```yaml
+agent_markers:
+  - claude
+  - mybot
+```
+
+A list that starts at the indent of its key (`agent_markers:` and then
+`- claude` at the same indent, as PyYAML writes it) is refused with that hint
+(`indent the list items under their key`), as are anchors, aliases, tags, flow
+maps (`{...}`), multi-line (`|`, `>`) scalars and a key given twice. So is a
+file that is not a mapping of settings, a bare list for one. Each is exit 2
+with one `error:` line that names the file and, for a YAML problem, the line.
+
 ## CI
 
 ```bash
@@ -317,7 +347,12 @@ default branch is `master`; pin to it (or to a tag once one exists):
     root: ""               # --root (empty = the checked-out repo)
 ```
 
-Outputs: `score`, `band`, `requires-review`, `exit-code`. The step runs
+Outputs: `score`, `band`, `requires-review`, `exit-code`. `exit-code` is
+always set - 0 pass, 1 fail, 2 when the check could not run (an input the
+CLI refuses, a path that is not a repository, a bad config, a ref that does
+not exist) - and the other three only when a score was worked out. A
+`$GITHUB_OUTPUT` that cannot be written is a warning on stderr, not a
+crash: the step's own exit status is the verdict. The step runs
 `python -I "$GITHUB_ACTION_PATH/run_action.py"`, which maps each input to
 the matching CLI flag — the test suite parses `action.yml` and asserts that
 mapping stays true.
@@ -383,8 +418,9 @@ for `git.exe` and other programs by bare name.
   still apply.
 - Which commit removed a line is worked out per commit and per file name,
   so a file that is renamed inside the PR hides its earlier removals from
-  the attribution: they read as human. And when agent commits remove each
-  other's lines the agent's removal count is an upper bound.
+  the attribution: they read as human. And a base line that an agent
+  removed and someone put back can still count for the agent, so the
+  agent's removal count is an upper bound.
 - Non-Python blast-radius extraction is heuristic.
 - The blast radius does not follow symbolic links and reads no source file
   larger than 4 MiB for its imports (such a file is still in the graph and

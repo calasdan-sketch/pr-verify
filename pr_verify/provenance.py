@@ -39,12 +39,16 @@ A line that was REMOVED is a changed line like an added one, credited to the
 commit that removed it: for every file that lost lines, the non-merge commits
 of the range that touched it are listed (`git rev-list`), and each one that
 is agent-authored is diffed against its parent for the lines it took out.
-What those commits removed, capped at what the range removes from the file
-in all (a line an agent added and removed again is no removal), is the
-agent's share; the rest is human. The cap makes the share an upper bound
-when agent commits remove each other's lines or the file was renamed in the
-range (a rename hides the file from the per-commit diffs: those removals
-read as human).
+Only a line the base already had counts: `git blame` of the parent, limited
+to the range, says whether each removed line was written inside it (see
+_base_lines), and a line the PR added and then took out again, or a human's
+new line an agent removes, is no removal at all. What the agent commits took
+out of the base's lines, capped at what the range removes from the file in
+all, is the agent's share; the rest is human. Two things keep it
+approximate: a base line an agent removed and someone put back still counts
+for the agent while the file lost other base lines (the cap is per file, not
+per line), and a file renamed after the agent's commit hides it from the
+per-commit diffs (those removals read as human).
 
 A submodule is a commit id, not a file, so it has no lines to blame: its one
 added line is the pointer (`Subproject commit <id>`) and goes to the last
@@ -224,9 +228,9 @@ class FileProvenance:
         return "mixed"
 
 
-#: `@@ -a[,b] +c[,d] @@`: groups are b (old lines), c (first new line), d
-#: (new lines); an omitted count means 1.
-_DIFF_HUNK_RE = re.compile(r"^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+#: `@@ -a[,b] +c[,d] @@`: groups are a (first old line), b (old lines), c
+#: (first new line), d (new lines); an omitted count means 1.
+_DIFF_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 _C_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\", '"': '"',
               "a": "\a", "b": "\b", "f": "\f", "v": "\v"}
 
@@ -262,14 +266,14 @@ def unquote_git_path(s: str) -> str:
     return out.decode("utf-8", "replace")
 
 
-def _header_path(line: str) -> str | None:
-    """Repo-relative path from a `+++ b/...` header (quoted or not), or
-    None for `+++ /dev/null`."""
+def _header_path(line: str, side: str = "b/") -> str | None:
+    """Repo-relative path from a `+++ b/...` header (or, with side="a/", a
+    `--- a/...` one), quoted or not, or None for `/dev/null`."""
     rest = line[4:].strip()
     rest = unquote_git_path(rest)
     if rest == "/dev/null":
         return None
-    if rest.startswith("b/"):
+    if rest.startswith(side):
         return rest[2:]
     return rest
 
@@ -322,14 +326,18 @@ def _patch(root: str, base: str, head: str) -> str:
         return run(*_PATCH, base, head, "--")
 
 
-def _scan_patch(out: str) -> tuple[dict[str, list[int]], dict[str, int]]:
-    """(file -> sorted added line numbers at head, file -> number of lines
-    removed) of a patch. A file that is gone (`+++ /dev/null`) has no entry
-    in either: whole-file deletions are reported as such."""
+def _walk_patch(out: str) -> tuple[dict[str, list[int]],
+                                   dict[str, list[int]], dict[str, str]]:
+    """(file -> sorted added line numbers at head, file -> sorted numbers of
+    the lines removed, in the OLD file, file -> its name in the old tree when
+    that differs) of a patch. A file that is gone (`+++ /dev/null`) has no
+    entry in any: whole-file deletions are reported as such."""
     result: dict[str, list[int]] = {}
-    removed: dict[str, int] = {}
+    taken: dict[str, list[int]] = {}
+    old_names: dict[str, str] = {}
     cur_file: str | None = None
-    new_line = 0
+    old_file: str | None = None
+    new_line = old_line = 0
     # A hunk header says how many old (-) and new (+) lines follow it, and a
     # context line counts on both sides (there is none under -U0, but
     # GIT_DIFF_OPTS=-u3 asks for some).
@@ -343,7 +351,8 @@ def _scan_patch(out: str) -> tuple[dict[str, list[int]], dict[str, int]]:
             if mark == "-" and old_left:
                 old_left -= 1
                 if cur_file is not None:
-                    removed[cur_file] = removed.get(cur_file, 0) + 1
+                    taken.setdefault(cur_file, []).append(old_line)
+                old_line += 1
                 continue
             if mark == "+" and new_left:
                 if cur_file is not None:
@@ -354,23 +363,38 @@ def _scan_patch(out: str) -> tuple[dict[str, list[int]], dict[str, int]]:
             if (mark == " " or not line) and old_left and new_left:
                 old_left -= 1       # an empty line is a blank context line
                 new_left -= 1
+                old_line += 1
                 new_line += 1
                 continue
             if mark == "\\":
                 continue  # "\ No newline at end of file": on neither side
             old_left = new_left = 0  # hunk ended early: a header after all
-        if line.startswith("+++ "):
+        if line.startswith("diff --git "):
+            old_file = None
+        elif line.startswith("--- "):
+            old_file = _header_path(line, "a/")
+        elif line.startswith("+++ "):
             cur_file = _header_path(line)
             if cur_file is not None:
                 result.setdefault(cur_file, [])
+                if old_file is not None and old_file != cur_file:
+                    old_names[cur_file] = old_file
         elif line.startswith("@@"):
             m = _DIFF_HUNK_RE.match(line)
             if m:
-                old_left = 1 if m.group(1) is None else int(m.group(1))
-                new_line = int(m.group(2))
-                new_left = 1 if m.group(3) is None else int(m.group(3))
+                old_line = int(m.group(1))
+                old_left = 1 if m.group(2) is None else int(m.group(2))
+                new_line = int(m.group(3))
+                new_left = 1 if m.group(4) is None else int(m.group(4))
     return ({f: sorted(ls) for f, ls in result.items() if ls},
-            {f: n for f, n in removed.items() if n})
+            {f: ns for f, ns in taken.items() if ns}, old_names)
+
+
+def _scan_patch(out: str) -> tuple[dict[str, list[int]], dict[str, int]]:
+    """(file -> sorted added line numbers at head, file -> number of lines
+    removed) of a patch (see _walk_patch)."""
+    added, taken, _ = _walk_patch(out)
+    return added, {f: len(ns) for f, ns in taken.items()}
 
 
 def added_lines(root: str, base: str, head: str = "HEAD") -> dict[str, list[int]]:
@@ -400,12 +424,16 @@ _PATHSPEC_BUDGET = 4000
 
 def _commits_touching(root: str, base: str, head: str,
                       paths: list[str]) -> list[tuple[str, str | None]]:
-    """(commit, its first parent or None) for the non-merge commits in
-    base..head that changed any of `paths`, sorted by id.
+    """(commit, its parent or None) for the non-merge commits in base..head
+    that changed any of `paths`, sorted by id.
 
     `:(literal)` keeps a file called `a[1].py` or `:x` what it is, and
     `--full-history` keeps the default history simplification from skipping
-    a side branch whose merge happens to equal one of its parents."""
+    a side branch whose merge happens to equal one of its parents. The
+    parent is the commit's own, from `%P`: with `--parents` git shows the
+    parent as the history of `paths` sees it (the nearest commit that
+    touched them), so the diff to it would hold other commits' changes, and
+    it differs from one batch of paths to the next."""
     found: dict[str, str | None] = {}
     chunk: list[str] = []
     size = 0
@@ -421,25 +449,61 @@ def _commits_touching(root: str, base: str, head: str,
         batches.append(chunk)
     for specs in batches:
         out = _git(root, "rev-list", "--no-merges", "--full-history",
-                   "--parents", f"{base}..{head}", "--", *specs)
+                   "--format=%P", f"{base}..{head}", "--", *specs)
+        sha = None
         for line in out.split("\n"):
-            parts = line.split()
-            if parts:
-                found[parts[0]] = parts[1] if len(parts) > 1 else None
+            if line.startswith("commit "):      # then a line of parents ...
+                sha = line[len("commit "):].strip()
+                found[sha] = None               # ... unless it has none
+            elif sha is not None:
+                parents = line.split()
+                if parents:
+                    found[sha] = parents[0]
+                sha = None
     return sorted(found.items())
+
+
+#: Whether the installed git takes `blame --no-ignore-revs-file`; None until
+#: _git_takes_no_ignore_revs_file() has asked.
+_NO_IGNORE_REVS: bool | None = None
+
+
+def _git_takes_no_ignore_revs_file() -> bool:
+    """Whether `git blame` has the negated --no-ignore-revs-file, which
+    `git blame -h` lists as --[no-]ignore-revs-file. Found out once: it is
+    the same git for every call of the run."""
+    global _NO_IGNORE_REVS
+    if _NO_IGNORE_REVS is None:
+        try:
+            p = subprocess.run([*_GIT_BASE, "blame", "-h"],
+                               capture_output=True, timeout=15)
+            usage = p.stdout + p.stderr       # either one, by git version
+        except (OSError, subprocess.SubprocessError):
+            usage = b""
+        _NO_IGNORE_REVS = b"--[no-]ignore-revs-file" in usage
+    return _NO_IGNORE_REVS
 
 
 def _blame_options(root: str) -> list[str]:
     """Extra `git blame` options. blame.ignoreRevsFile (a setting for
     skipping formatting commits) makes blame look past the commits a file
     lists, and the file is in the PR: it could list the agent's commits, and
-    their lines would read as the older, human ones. An empty
-    --ignore-revs-file clears the list. Only when the setting exists, so a
+    their lines would read as the older, human ones.
+
+    --no-ignore-revs-file drops the configured list before git opens any
+    file in it. The empty --ignore-revs-file= (all that older gits have)
+    clears it only after git has tried them, so a setting that names a file
+    which is not there (copied from another machine) stops every blame with
+    "could not open object name list". Only when the setting exists, so a
     git older than 2.23 (which has neither) is not asked for it."""
     p = subprocess.run([*_GIT_BASE, "-C", root, "config", "--get-all",
                         "blame.ignoreRevsFile"], capture_output=True,
                        timeout=15)
-    return ["--ignore-revs-file="] if p.returncode == 0 else []
+    if p.returncode != 0:
+        return []
+    if _git_takes_no_ignore_revs_file():
+        return ["--no-ignore-revs-file"]
+    return ["--ignore-revs-file="]
 
 
 def _is_gitlink(root: str, head: str, rel: str) -> bool:
@@ -461,11 +525,14 @@ def _pointer_authors(root: str, base: str, head: str, rel: str,
     return {ln: shas[0] for ln in linenos}
 
 
-def _blame_authors(root: str, head: str, rel: str,
-                   options: list[str] | tuple = ()) -> dict[int, str]:
-    """Line number -> commit sha, for <head> version of file."""
-    out = _git(root, "blame", "--porcelain", *options, head, "--", rel)
+def _parse_blame(out: str) -> tuple[dict[int, str], set[str]]:
+    """(line number -> commit sha, the shas git marks `boundary`) of `git
+    blame --porcelain` output. A boundary commit is one outside the range
+    blame was given (`^base head`): a line blamed on it is older than the
+    range. Every file line comes tab-prefixed, so no line of the file can
+    pass for one of git's own."""
     authors: dict[int, str] = {}
+    boundary: set[str] = set()
     sha = ""
     lineno = 0
     for line in out.split("\n"):
@@ -475,7 +542,68 @@ def _blame_authors(root: str, head: str, rel: str,
         elif line.startswith("\t"):
             authors[lineno] = sha
             lineno += 1  # each content line advances within the hunk
-    return authors
+        elif line == "boundary":
+            boundary.add(sha)
+    return authors, boundary
+
+
+def _blame_authors(root: str, head: str, rel: str,
+                   options: list[str] | tuple = ()) -> dict[int, str]:
+    """Line number -> commit sha, for <head> version of file."""
+    out = _git(root, "blame", "--porcelain", *options, head, "--", rel)
+    return _parse_blame(out)[0]
+
+
+#: characters of `-L` options per `git blame` call, well under Windows'
+#: 8191-character command line. A commit that took lines out of so many
+#: places that the ranges do not fit has the whole file blamed instead.
+_BLAME_BUDGET = 4000
+
+
+def _runs(numbers: list[int]) -> list[tuple[int, int]]:
+    """Line numbers as (first, last) runs of consecutive lines."""
+    runs: list[list[int]] = []
+    for n in sorted(numbers):
+        if runs and n == runs[-1][1] + 1:
+            runs[-1][1] = n
+        else:
+            runs.append([n, n])
+    return [(first, last) for first, last in runs]
+
+
+def _base_lines(root: str, base: str, parent: str, rel: str,
+                numbers: list[int], options: list[str]) -> int:
+    """How many of the lines `numbers` of `rel` as it was at `parent` were
+    already in the file at `base`, and not written by a commit of the range
+    base..parent. `git blame ^base parent` says: it names the commit that
+    wrote each line, and marks the ones outside the range as the boundary.
+    Blame follows the file through renames (`rel` is its name at `parent`)
+    and sees merges for what they are.
+
+    A submodule has one line, its pointer: the base's unless a commit of the
+    range moved it. Nothing between the base and the commit (`parent` is
+    `base`) needs no question: every line is the base's."""
+    if parent == base:
+        return len(numbers)
+    if _is_gitlink(root, parent, rel):
+        moved = _git(root, "rev-list", "-1", "--full-history",
+                     f"{base}..{parent}", "--", ":(literal)" + rel).split()
+        return 0 if moved else len(numbers)
+    ranges = [f"-L{first},{last}" for first, last in _runs(numbers)]
+    if sum(len(r) + 1 for r in ranges) > _BLAME_BUDGET:
+        ranges = []
+    out = _git(root, "blame", "--porcelain", *options, *ranges, f"^{base}",
+               parent, "--", rel)
+    wrote, boundary = _parse_blame(out)
+    found = 0
+    for line in sorted(set(numbers)):
+        if line not in wrote:
+            raise RuntimeError(f"git blame did not name the commit of line "
+                               f"{line} of {rel} at {parent[:12]}; refusing "
+                               f"to guess who wrote it")
+        if wrote[line] in boundary:
+            found += 1
+    return found
 
 
 #: shas per `git show` call: keeps the command line well under Windows'
@@ -540,7 +668,7 @@ def analyze(root: str, base: str, head: str = "HEAD",
     blame_maps: dict[str, dict[int, str]] = {}
     del_shas: dict[str, list[str]] = {}
     all_shas: set[str] = set()
-    blame_options = _blame_options(root) if added else []
+    blame_options = _blame_options(root) if added or removed else []
     for rel in added:
         try:
             bm = _blame_authors(root, head, rel, blame_options)
@@ -564,16 +692,22 @@ def analyze(root: str, base: str, head: str = "HEAD",
         hit = markers_mod.match(name, email, subject, body, agent_markers)
         if hit:
             matched[sha] = hit
-    # file -> {agent commit: lines it removed from the file}
+    # file -> {agent commit: base lines it removed from the file}
     agent_removals: dict[str, dict[str, int]] = {}
     agent_removers = [(sha, parent) for sha, parent in removers
                       if sha in matched and parent]
     if agent_removers:
         with _plumbing_view(root) as run:
             for sha, parent in agent_removers:
-                _, gone = _scan_patch(run(*_PATCH, parent, sha, "--"))
-                for rel, n in gone.items():
-                    if rel in removed:
+                _, taken, old_names = _walk_patch(
+                    run(*_PATCH, parent, sha, "--"))
+                for rel, numbers in taken.items():
+                    if rel not in removed:
+                        continue
+                    n = _base_lines(root, base, parent,
+                                    old_names.get(rel, rel), numbers,
+                                    blame_options)
+                    if n:
                         agent_removals.setdefault(rel, {})[sha] = n
 
     def who(sha: str) -> str:

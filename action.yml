@@ -40,7 +40,7 @@ outputs:
     description: true when the score reached min-score.
     value: ${{ steps.verify.outputs.requires-review }}
   exit-code:
-    description: Exit status of pr-verify check (0 pass, 1 fail, 2 error).
+    description: Exit status of pr-verify check (0 pass, 1 fail, 2 error); set on every path, also when the inputs are refused.
     value: ${{ steps.verify.outputs.exit-code }}
 runs:
   using: composite

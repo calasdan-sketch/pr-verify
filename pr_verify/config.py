@@ -63,21 +63,47 @@ DEFAULTS = {
 }
 
 
+#: The byte-order marks of UTF-16 text (little- and big-endian). No UTF-8
+#: text starts with either byte.
+_UTF16_MARKS = (b"\xff\xfe", b"\xfe\xff")
+
+
 def _read_base_config(root: str, base: str) -> dict:
-    """Return the parsed config file as committed at <base>, or {}."""
+    """Return the parsed config file as committed at <base>, or {}.
+
+    The file is UTF-8 text; a byte-order mark in front of it (Notepad's
+    "UTF-8", PowerShell's `Set-Content -Encoding utf8`) is not part of the
+    first key. UTF-16 text (what PowerShell's `>` writes) is refused by
+    name: read as UTF-8 it is a screenful of NULs."""
     p = subprocess.run(
         ["git", "-C", root, "show", f"{base}:{CONFIG_FILE}"],
-        capture_output=True, text=True, encoding="utf-8",
-        errors="replace", timeout=15)
+        capture_output=True, timeout=15)
     if p.returncode != 0:
         return {}
-    try:
-        return miniyaml.safe_load(p.stdout) or {}
-    except ValueError as e:
+    if p.stdout[:2] in _UTF16_MARKS:
         raise RuntimeError(
-            f"invalid {CONFIG_FILE} at {base}: {e} "
-            f"(supported: plain mappings/lists/scalars, no anchors or "
-            f"multi-line scalars)") from e
+            f"invalid {CONFIG_FILE} at {base}: the file is UTF-16 text "
+            f"(PowerShell's > writes that) - save it as UTF-8")
+    text = p.stdout.decode("utf-8-sig", errors="replace")
+    try:
+        data = miniyaml.safe_load(text) or {}
+    except ValueError as e:
+        if "list item inside mapping" in str(e):
+            # `key:` and then `- x` at the same indent: valid YAML (it is
+            # how PyYAML writes lists) that the shared reader does not take
+            hint = ("indent the list items under their key, two spaces "
+                    "more than the `key:` line")
+        else:
+            hint = ("supported: plain mappings/lists/scalars, no anchors or "
+                    "multi-line scalars")
+        raise RuntimeError(
+            f"invalid {CONFIG_FILE} at {base}: {e} ({hint})") from e
+    if not isinstance(data, dict):
+        kind = "a list" if isinstance(data, list) else type(data).__name__
+        raise RuntimeError(
+            f"invalid {CONFIG_FILE} at {base}: it must be a mapping of "
+            f"settings (risk_threshold: 70), not {kind}")
+    return data
 
 
 _INT_FIELDS = {"risk_threshold": (0, 100), "timeout": (1, None)}
