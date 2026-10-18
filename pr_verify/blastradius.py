@@ -17,6 +17,11 @@ Python import resolution (deterministic, no execution):
     (src/pkg/core.py -> src.pkg.core, pkg.core, core), so `src/` layouts,
     namespace dirs and bare-name imports resolve. Over-approximating a
     dependent is the safe direction for a trust tool.
+
+The worktree is read ONCE per run (_scan): the graph and the dependents of
+every deleted file are both worked out from that one pass. And only regular
+files are opened, and only up to MAX_SOURCE_BYTES: a pull request can bring a
+link to /dev/zero named evil.py, and a worktree can hold a named pipe.
 """
 
 from __future__ import annotations
@@ -25,6 +30,7 @@ import ast
 import dataclasses
 import os
 import re
+import stat
 
 PY_EXTS = {".py"}
 OTHER_EXTS = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
@@ -34,6 +40,10 @@ SCANNED_EXTS = PY_EXTS | OTHER_EXTS
 #: Directories the scan never enters.
 SKIP_DIRS = frozenset({".git", "node_modules", "__pycache__", ".venv", "venv",
                        "dist", "build", ".tox", "vendor"})
+#: A source file larger than this is not read for imports (a generated
+#: bundle or a data dump with a source extension): it stays in the graph,
+#: with nothing that it imports. The read itself stops one byte past this.
+MAX_SOURCE_BYTES = 4 * 1024 * 1024
 
 _GENERIC_IMPORT_RES = [
     re.compile(r'^\s*import\s+(?:type\s+)?[{*]?[^"\']*?from\s+["\']([^"\']+)["\']'),
@@ -69,7 +79,9 @@ def _python_imports(rel: str, content: str) -> list[str]:
     """Dotted names a Python file may depend on (absolute form)."""
     try:
         tree = ast.parse(content)
-    except (SyntaxError, ValueError):
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        # RecursionError / MemoryError: source nested or chained too deep
+        # for the parser (a SyntaxError on some versions, not on others)
         return []
     pkg = _package_of(rel)
     mods: list[str] = []
@@ -149,14 +161,41 @@ class BlastRadius:
         return len(self.transitive)
 
 
+def _is_regular(path: str) -> bool:
+    """A regular file: not a link (to a file, a directory, a device ...), not
+    a named pipe, not a device. Opening a link to /dev/zero reads for ever,
+    opening a pipe blocks for ever, and a pull request can bring the link.
+    Links to directories are not followed either (os.walk)."""
+    try:
+        return stat.S_ISREG(os.lstat(path).st_mode)
+    except OSError:
+        return False
+
+
 def _iter_files(root: str) -> list[str]:
     out = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
         for fn in filenames:
             if os.path.splitext(fn)[1].lower() in SCANNED_EXTS:
-                out.append(os.path.join(dirpath, fn))
+                path = os.path.join(dirpath, fn)
+                if _is_regular(path):
+                    out.append(path)
     return sorted(out)
+
+
+def _read_source(path: str) -> str | None:
+    """The text of a source file, or None when it is not read: bigger than
+    MAX_SOURCE_BYTES, or unreadable. A UTF-8 byte order mark (Windows
+    editors write one) is not part of the text: the parser rejects it."""
+    try:
+        with open(path, "rb") as f:
+            data = f.read(MAX_SOURCE_BYTES + 1)
+    except (OSError, MemoryError):
+        return None
+    if len(data) > MAX_SOURCE_BYTES:
+        return None
+    return data.decode("utf-8-sig", "replace")
 
 
 def skipped_dir(rel: str) -> str | None:
@@ -177,27 +216,60 @@ def _scan_status(root: str, rel: str) -> str:
     return "not_scanned"
 
 
-def build_graph(root: str) -> dict[str, set[str]]:
+def _scan(root: str) -> tuple[list[str], dict[str, list[str]]]:
+    """Read the worktree: (rel paths of its source files, rel path -> the
+    module names that file imports, as written). Everything below is worked
+    out from this, so a file is read and parsed once per run, not once more
+    for every deleted file."""
+    rels: list[str] = []
+    imports: dict[str, list[str]] = {}
+    for path in _iter_files(root):
+        rel = os.path.relpath(path, root).replace(os.sep, "/")
+        rels.append(rel)
+        content = _read_source(path)
+        imports[rel] = ([] if content is None
+                        else _imports_of(path, content, rel))
+    return rels, imports
+
+
+def _graph(rels: list[str],
+           imports: dict[str, list[str]]) -> dict[str, set[str]]:
     """rel path -> set of rel paths it imports (in-repo only)."""
-    files = _iter_files(root)
-    rels = [os.path.relpath(p, root).replace(os.sep, "/") for p in files]
     # index: dotted name -> rel
     index: dict[str, str] = {}
     for rel in rels:
         for cand in _module_candidates(rel):
             index.setdefault(cand, rel)
     graph: dict[str, set[str]] = {rel: set() for rel in rels}
-    for path, rel in zip(files, rels):
-        try:
-            with open(path, encoding="utf-8", errors="replace") as f:
-                content = f.read()
-        except OSError:
-            continue
-        for mod in _imports_of(path, content, rel):
+    for rel in rels:
+        for mod in imports[rel]:
             target = index.get(mod)
             if target and target != rel:
                 graph[rel].add(target)
     return graph
+
+
+def _importers(imports: dict[str, list[str]]) -> dict[str, set[str]]:
+    """Module name, as written in an import -> the files that import it."""
+    out: dict[str, set[str]] = {}
+    for rel, mods in imports.items():
+        for mod in mods:
+            out.setdefault(mod, set()).add(rel)
+    return out
+
+
+def _importing(importers: dict[str, set[str]],
+               module_names: set[str]) -> list[str]:
+    """rel paths importing any of module_names (see dependents_of_modules)."""
+    found: set[str] = set()
+    for name in module_names:
+        found.update(importers.get(name, ()))
+    return sorted(found)
+
+
+def build_graph(root: str) -> dict[str, set[str]]:
+    """rel path -> set of rel paths it imports (in-repo only)."""
+    return _graph(*_scan(root))
 
 
 def dependents_of_modules(root: str, module_names: set[str]) -> list[str]:
@@ -210,17 +282,8 @@ def dependents_of_modules(root: str, module_names: set[str]) -> list[str]:
     """
     if not module_names:
         return []
-    out = []
-    for path in _iter_files(root):
-        rel = os.path.relpath(path, root).replace(os.sep, "/")
-        try:
-            with open(path, encoding="utf-8", errors="replace") as f:
-                content = f.read()
-        except OSError:
-            continue
-        if set(_imports_of(path, content, rel)) & module_names:
-            out.append(rel)
-    return sorted(out)
+    _, imports = _scan(root)
+    return _importing(_importers(imports), module_names)
 
 
 def _transitive_dependents(reverse: dict[str, set[str]],
@@ -238,7 +301,9 @@ def _transitive_dependents(reverse: dict[str, set[str]],
 
 
 def analyze(root: str, changed: list[str]) -> dict[str, BlastRadius]:
-    graph = build_graph(root)
+    rels, imports = _scan(root)         # the one read of the worktree
+    graph = _graph(rels, imports)
+    importers = _importers(imports)
     # invert
     reverse: dict[str, set[str]] = {rel: set() for rel in graph}
     for src, deps in graph.items():
@@ -260,7 +325,7 @@ def analyze(root: str, changed: list[str]) -> dict[str, BlastRadius]:
         # `config`, so it gets no guessed dependents.
         scan = _scan_status(root, rel)
         direct = ([] if scan == "not_source" else
-                  dependents_of_modules(root, set(_module_candidates(rel))))
+                  _importing(importers, set(_module_candidates(rel))))
         transitive = _transitive_dependents(reverse, direct, rel)
         result[rel] = BlastRadius(file=rel, direct=direct,
                                   transitive=transitive,

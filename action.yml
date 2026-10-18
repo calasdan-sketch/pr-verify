@@ -55,4 +55,6 @@ runs:
         PR_VERIFY_MIN_SCORE: ${{ inputs.min-score }}
         PR_VERIFY_SKIP_GATES: ${{ inputs.skip-gates }}
         PR_VERIFY_ROOT: ${{ inputs.root }}
-      run: python -m pip install --quiet "$GITHUB_ACTION_PATH" && python -m pr_verify.action
+      # -I: the checkout (the working directory) is data, never imported from;
+      # see run_action.py. Nothing to install: pr-verify has no dependencies.
+      run: python -I "$GITHUB_ACTION_PATH/run_action.py"

@@ -1,8 +1,12 @@
 """Provenance: which added lines were written by an agent vs a human.
 
 Method (deterministic, no LLM):
-  1. `git diff-tree -p -U0 -M base head` -> added lines per file (hunks).
-  2. `git blame --porcelain <head> -- <file>` -> commit per line.
+  0. The range starts at the MERGE-BASE of base and head, not at base's tip
+     (see merge_base): whatever the base branch gained after the PR branched
+     is not the PR's change.
+  1. `git diff-tree -p -U0 -M base head` -> added lines per file (hunks)
+     and how many lines each file lost.
+  2. `git blame --porcelain <head> -- <file>` -> commit per added line.
   3. one `git show -s` for all those commits -> author name/email,
      subject, body.
   4. A commit is agent-authored when an agent marker matches its author
@@ -31,6 +35,21 @@ add one that marks a source file `binary`, and git then prints "Binary files
 differ" instead of its lines) and through plumbing, which ignores the user's
 color, prefix, context and external-diff settings (see _patch).
 
+A line that was REMOVED is a changed line like an added one, credited to the
+commit that removed it: for every file that lost lines, the non-merge commits
+of the range that touched it are listed (`git rev-list`), and each one that
+is agent-authored is diffed against its parent for the lines it took out.
+What those commits removed, capped at what the range removes from the file
+in all (a line an agent added and removed again is no removal), is the
+agent's share; the rest is human. The cap makes the share an upper bound
+when agent commits remove each other's lines or the file was renamed in the
+range (a rename hides the file from the per-commit diffs: those removals
+read as human).
+
+A submodule is a commit id, not a file, so it has no lines to blame: its one
+added line is the pointer (`Subproject commit <id>`) and goes to the last
+commit of the range that moved it (see _pointer_authors).
+
 Deleted files are reported too: `git diff-tree --diff-filter=D` finds them and
 `git log --diff-filter=D` identifies the deleting commit(s), so a deletion
 can never slip through as "nothing to verify". For a deleted file the
@@ -52,6 +71,7 @@ authorship to analyze.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import os
 import re
@@ -149,6 +169,22 @@ def snapshot_worktree(root: str, include_untracked: bool = False) -> str | None:
             pass
 
 
+def merge_base(root: str, base: str, head: str) -> str | None:
+    """The commit where `head` left `base` (git merge-base), or None when
+    the two share no history: unrelated histories, or a shallow clone that
+    does not reach back to the fork point. base and head are commit ids or
+    refs that do not start with '-'."""
+    p = subprocess.run([*_GIT_BASE, "-C", root, "merge-base", base, head],
+                       capture_output=True, timeout=60)
+    sha = p.stdout.decode("ascii", "replace").strip()
+    if p.returncode == 0 and re.fullmatch(r"[0-9a-f]{40,64}", sha):
+        return sha
+    if p.returncode == 1 and not p.stderr.strip():
+        return None          # git's way to say "no common ancestor"
+    err = p.stderr.decode("utf-8", "replace").strip()[:200]
+    raise RuntimeError(f"git merge-base failed: {err}")
+
+
 @dataclasses.dataclass
 class FileProvenance:
     file: str
@@ -158,19 +194,32 @@ class FileProvenance:
     agents: set = dataclasses.field(default_factory=set)  # "author (marker)"
     deleted: bool = False
     deleted_by: list = dataclasses.field(default_factory=list)  # author names
+    #: lines taken out of a file that is still there (a file that is gone is
+    #: `deleted`, not this), and how many of those an agent's commit removed
+    removed: int = 0
+    agent_removed: int = 0
+
+    @property
+    def changed(self) -> int:
+        """Lines added plus lines removed."""
+        return self.added + self.removed
+
+    @property
+    def agent_changed(self) -> int:
+        return self.agent_added + self.agent_removed
 
     @property
     def agent_share(self) -> float:
-        return self.agent_added / self.added if self.added else 0.0
+        return self.agent_changed / self.changed if self.changed else 0.0
 
     def label(self) -> str:
         if self.deleted:
             return "deleted"
-        if self.added == 0:
+        if self.changed == 0:
             return "untouched"
-        if self.agent_added == self.added:
+        if self.agent_changed == self.changed:
             return "agent"
-        if self.agent_added == 0:
+        if self.agent_changed == 0:
             return "human"
         return "mixed"
 
@@ -236,6 +285,25 @@ _PATCH = ("diff-tree", "-p", "-U0", "-M", "--no-commit-id",
           "--no-ext-diff", "--no-textconv")
 
 
+@contextlib.contextmanager
+def _plumbing_view(root: str):
+    """A function that runs `git <args>` against root's objects with an empty
+    work tree and no index (see _patch for why), for as many calls as the
+    caller makes: the set-up is paid once."""
+    # a directory name is bytes to the file system, not necessarily UTF-8
+    gitdir = os.fsdecode(_git_bytes(root, "rev-parse",
+                                    "--absolute-git-dir")).rstrip("\r\n")
+    with tempfile.TemporaryDirectory(prefix="pr-verify-",
+                                     ignore_cleanup_errors=True) as empty:
+        env = dict(os.environ)
+        env["GIT_INDEX_FILE"] = os.path.join(empty, "index")
+
+        def run(*args: str) -> str:
+            return _git(empty, "--git-dir", gitdir, "--work-tree", empty,
+                        *args, env=env)
+        yield run
+
+
 def _patch(root: str, base: str, head: str) -> str:
     """The patch from base to head, as the files are and not as the
     repository's .gitattributes would like them shown.
@@ -250,21 +318,16 @@ def _patch(root: str, base: str, head: str) -> str:
     (`--text` would turn the PNG into added lines too.) The repository's
     objects are used as they are: only the work tree and the index are
     replaced."""
-    # a directory name is bytes to the file system, not necessarily UTF-8
-    gitdir = os.fsdecode(_git_bytes(root, "rev-parse",
-                                    "--absolute-git-dir")).rstrip("\r\n")
-    with tempfile.TemporaryDirectory(prefix="pr-verify-",
-                                     ignore_cleanup_errors=True) as empty:
-        env = dict(os.environ)
-        env["GIT_INDEX_FILE"] = os.path.join(empty, "index")
-        return _git(empty, "--git-dir", gitdir, "--work-tree", empty,
-                    *_PATCH, base, head, "--", env=env)
+    with _plumbing_view(root) as run:
+        return run(*_PATCH, base, head, "--")
 
 
-def added_lines(root: str, base: str, head: str = "HEAD") -> dict[str, list[int]]:
-    """Repo-relative file -> sorted list of added line numbers (at head)."""
-    out = _patch(root, base, head)
+def _scan_patch(out: str) -> tuple[dict[str, list[int]], dict[str, int]]:
+    """(file -> sorted added line numbers at head, file -> number of lines
+    removed) of a patch. A file that is gone (`+++ /dev/null`) has no entry
+    in either: whole-file deletions are reported as such."""
     result: dict[str, list[int]] = {}
+    removed: dict[str, int] = {}
     cur_file: str | None = None
     new_line = 0
     # A hunk header says how many old (-) and new (+) lines follow it, and a
@@ -279,6 +342,8 @@ def added_lines(root: str, base: str, head: str = "HEAD") -> dict[str, list[int]
             mark = line[:1]
             if mark == "-" and old_left:
                 old_left -= 1
+                if cur_file is not None:
+                    removed[cur_file] = removed.get(cur_file, 0) + 1
                 continue
             if mark == "+" and new_left:
                 if cur_file is not None:
@@ -304,7 +369,13 @@ def added_lines(root: str, base: str, head: str = "HEAD") -> dict[str, list[int]
                 old_left = 1 if m.group(1) is None else int(m.group(1))
                 new_line = int(m.group(2))
                 new_left = 1 if m.group(3) is None else int(m.group(3))
-    return {f: sorted(ls) for f, ls in result.items() if ls}
+    return ({f: sorted(ls) for f, ls in result.items() if ls},
+            {f: n for f, n in removed.items() if n})
+
+
+def added_lines(root: str, base: str, head: str = "HEAD") -> dict[str, list[int]]:
+    """Repo-relative file -> sorted list of added line numbers (at head)."""
+    return _scan_patch(_patch(root, base, head))[0]
 
 
 def deleted_files(root: str, base: str, head: str = "HEAD") -> list[str]:
@@ -322,6 +393,42 @@ def _deletion_commits(root: str, base: str, head: str,
     return [ln for ln in out.splitlines() if ln]
 
 
+#: characters of pathspecs per `git rev-list` call: well under Windows'
+#: 8191-character command line, however long the paths are
+_PATHSPEC_BUDGET = 4000
+
+
+def _commits_touching(root: str, base: str, head: str,
+                      paths: list[str]) -> list[tuple[str, str | None]]:
+    """(commit, its first parent or None) for the non-merge commits in
+    base..head that changed any of `paths`, sorted by id.
+
+    `:(literal)` keeps a file called `a[1].py` or `:x` what it is, and
+    `--full-history` keeps the default history simplification from skipping
+    a side branch whose merge happens to equal one of its parents."""
+    found: dict[str, str | None] = {}
+    chunk: list[str] = []
+    size = 0
+    batches = []
+    for rel in paths:
+        spec = ":(literal)" + rel
+        if chunk and size + len(spec) > _PATHSPEC_BUDGET:
+            batches.append(chunk)
+            chunk, size = [], 0
+        chunk.append(spec)
+        size += len(spec) + 1
+    if chunk:
+        batches.append(chunk)
+    for specs in batches:
+        out = _git(root, "rev-list", "--no-merges", "--full-history",
+                   "--parents", f"{base}..{head}", "--", *specs)
+        for line in out.split("\n"):
+            parts = line.split()
+            if parts:
+                found[parts[0]] = parts[1] if len(parts) > 1 else None
+    return sorted(found.items())
+
+
 def _blame_options(root: str) -> list[str]:
     """Extra `git blame` options. blame.ignoreRevsFile (a setting for
     skipping formatting commits) makes blame look past the commits a file
@@ -333,6 +440,25 @@ def _blame_options(root: str) -> list[str]:
                         "blame.ignoreRevsFile"], capture_output=True,
                        timeout=15)
     return ["--ignore-revs-file="] if p.returncode == 0 else []
+
+
+def _is_gitlink(root: str, head: str, rel: str) -> bool:
+    """Is rel a submodule at head (tree entry mode 160000)?"""
+    return _git_bytes(root, "ls-tree", "-z", head, "--",
+                      rel).startswith(b"160000 ")
+
+
+def _pointer_authors(root: str, base: str, head: str, rel: str,
+                     linenos: list[int]) -> dict[int, str]:
+    """Line number -> commit for the added lines of a submodule: its pointer.
+    The commit that last moved it in base..head wrote it (`git blame` cannot
+    say: there is no file to blame)."""
+    shas = _git(root, "rev-list", "-1", "--full-history", f"{base}..{head}",
+                "--", ":(literal)" + rel).split()
+    if not shas:
+        raise RuntimeError(f"no commit in {base}..{head} moved the submodule "
+                           f"{rel}; refusing to guess who did")
+    return {ln: shas[0] for ln in linenos}
 
 
 def _blame_authors(root: str, head: str, rel: str,
@@ -404,8 +530,9 @@ def agent_label(name: str, marker: str) -> str:
 def analyze(root: str, base: str, head: str = "HEAD",
             agent_markers: list[str] | None = None) -> dict[str, FileProvenance]:
     agent_markers = [str(m).lower() for m in (agent_markers or [])]
-    added = {rel: lines for rel, lines in added_lines(root, base, head).items()
-             if rel != CONFIG_FILE}
+    added, removed = _scan_patch(_patch(root, base, head))
+    added = {rel: lines for rel, lines in added.items() if rel != CONFIG_FILE}
+    removed = {rel: n for rel, n in removed.items() if rel != CONFIG_FILE}
     deleted = [rel for rel in deleted_files(root, base, head)
                if rel != CONFIG_FILE]
     result: dict[str, FileProvenance] = {}
@@ -415,27 +542,47 @@ def analyze(root: str, base: str, head: str = "HEAD",
     all_shas: set[str] = set()
     blame_options = _blame_options(root) if added else []
     for rel in added:
-        bm = _blame_authors(root, head, rel, blame_options)
+        try:
+            bm = _blame_authors(root, head, rel, blame_options)
+        except RuntimeError:
+            if not _is_gitlink(root, head, rel):
+                raise
+            bm = _pointer_authors(root, base, head, rel, added[rel])
         blame_maps[rel] = bm
         all_shas.update(bm[ln] for ln in added[rel] if ln in bm)
     for rel in deleted:
         shas = _deletion_commits(root, base, head, rel)
         del_shas[rel] = shas
         all_shas.update(shas)
+    # who took the lines out: the commits of the range that touched them
+    removers = (_commits_touching(root, base, head, sorted(removed))
+                if removed else [])
+    all_shas.update(sha for sha, _ in removers)
     texts = _commit_text(root, all_shas)
     matched: dict[str, str] = {}   # sha -> marker that identified it
     for sha, (name, email, subject, body) in texts.items():
         hit = markers_mod.match(name, email, subject, body, agent_markers)
         if hit:
             matched[sha] = hit
+    # file -> {agent commit: lines it removed from the file}
+    agent_removals: dict[str, dict[str, int]] = {}
+    agent_removers = [(sha, parent) for sha, parent in removers
+                      if sha in matched and parent]
+    if agent_removers:
+        with _plumbing_view(root) as run:
+            for sha, parent in agent_removers:
+                _, gone = _scan_patch(run(*_PATCH, parent, sha, "--"))
+                for rel, n in gone.items():
+                    if rel in removed:
+                        agent_removals.setdefault(rel, {})[sha] = n
 
     def who(sha: str) -> str:
         return texts.get(sha, (sha[:7], "", "", ""))[0] or sha[:7]
 
-    for rel, linenos in added.items():
+    for rel in sorted(set(added) | set(removed)):
         fp = FileProvenance(file=rel)
-        bm = blame_maps[rel]
-        for ln in linenos:
+        bm = blame_maps.get(rel, {})
+        for ln in added.get(rel, []):
             fp.added += 1
             sha = bm.get(ln)
             if sha in matched:
@@ -443,6 +590,12 @@ def analyze(root: str, base: str, head: str = "HEAD",
                 fp.agents.add(agent_label(who(sha), matched[sha]))
             else:
                 fp.human_added += 1
+        fp.removed = removed.get(rel, 0)
+        by_agent = agent_removals.get(rel, {})
+        fp.agent_removed = min(fp.removed, sum(by_agent.values()))
+        if fp.agent_removed:
+            for sha in sorted(by_agent):
+                fp.agents.add(agent_label(who(sha), matched[sha]))
         result[rel] = fp
     for rel in deleted:
         fp = FileProvenance(file=rel, deleted=True)

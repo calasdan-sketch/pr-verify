@@ -3,11 +3,13 @@
 Score 0-100 from six observable factors. The formula is public so teams
 can argue with it and tune it — a black-box score is just another opinion.
 
-  agent_share  40 pts  % of added lines written by an agent (provenance)
+  agent_share  40 pts  % of changed lines (added + removed) that an agent
+                      wrote or removed (provenance); a whole deleted file
+                      is not counted here, see `deletion`
   blast        25 pts  log-scaled transitive dependents: 25 * min(1, log10(1+n)/2)
                       (n=9 -> ~12.5, n=99 -> 25)
-  sensitive    20 pts  any changed file under a sensitive_path glob
-                      (deleted files match like touched files)
+  sensitive    20 pts  any changed file under a sensitive_path glob, case
+                      ignored (deleted files match like touched files)
   gates        10 pts  any policy gate failed or timed out (0 if no gates)
   no_tests      5 pts  src changed but no test file changed
   deletion     50 pts  agent-attributed deletions: 45 if any deleted file
@@ -86,10 +88,14 @@ def _sensitive_candidates(f: str) -> list[str]:
 
 
 def _sensitive_hits(files: list[str], sensitive_paths: list[str]) -> list[str]:
+    """The files that match a sensitive glob, ignoring case: Login.tsx and
+    PASSWORD.txt are as sensitive as login.tsx (and the file systems of
+    Windows and macOS do not tell them apart either)."""
+    globs = [p.casefold() for p in sensitive_paths]
     return sorted({f for f in files
-                   if any(fnmatch.fnmatchcase(c, p)
+                   if any(fnmatch.fnmatchcase(c.casefold(), p)
                           for c in _sensitive_candidates(f)
-                          for p in sensitive_paths)})
+                          for p in globs)})
 
 
 def _blast_points(n: int, cap: int) -> int:
@@ -106,12 +112,21 @@ def score(prov: dict[str, prov_mod.FileProvenance],
 
     total_added = sum(f.added for f in prov.values())
     agent_added = sum(f.agent_added for f in prov.values())
-    share = agent_added / total_added if total_added else 0.0
+    total_removed = sum(f.removed for f in prov.values())
+    agent_removed = sum(f.agent_removed for f in prov.values())
+    total_changed = total_added + total_removed
+    share = ((agent_added + agent_removed) / total_changed
+             if total_changed else 0.0)
     pts = round(share * 40)
-    factors["agent_share"] = {
-        "points": pts,
-        "detail": f"{agent_added}/{total_added} added lines agent-authored "
-                  f"({share:.0%})"}
+    if total_removed:
+        detail = (f"{agent_added + agent_removed}/{total_changed} changed "
+                  f"lines agent-authored ({share:.0%}): {agent_added}/"
+                  f"{total_added} added, {agent_removed}/{total_removed} "
+                  f"removed")
+    else:
+        detail = (f"{agent_added}/{total_added} added lines agent-authored "
+                  f"({share:.0%})")
+    factors["agent_share"] = {"points": pts, "detail": detail}
 
     max_n = max((b.size for b in blast.values()), default=0)
     pts = _blast_points(max_n, 25)

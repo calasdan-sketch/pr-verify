@@ -52,8 +52,11 @@ class TestActionYml(unittest.TestCase):
         step = runs["steps"][0]
         self.assertEqual(step["id"], "verify")
         self.assertEqual(step["shell"], "bash")
-        self.assertIn("python -m pr_verify.action", step["run"])
-        self.assertIn("$GITHUB_ACTION_PATH", step["run"])
+        # isolated python, started from the action's own directory (why:
+        # test_round5_fixes.TestActionNeverRunsCheckoutCode)
+        self.assertEqual(step["run"].strip(),
+                         'python -I "$GITHUB_ACTION_PATH/run_action.py"')
+        self.assertTrue(os.path.isfile(os.path.join(REPO, "run_action.py")))
         # the entry module exists and is importable
         self.assertIsNotNone(importlib.util.find_spec("pr_verify.action"))
 

@@ -163,3 +163,61 @@ class TestEmptyBlockList(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestApostropheAndComments(unittest.TestCase):
+    """A quote opens a quoted scalar only where a scalar starts. Elsewhere
+    (the apostrophe in "It's") it is an ordinary character: it must neither
+    hide a trailing "# comment" nor break a flow list."""
+
+    def test_apostrophe_in_a_plain_scalar_keeps_comment_stripping(self):
+        self.assertEqual(miniyaml.safe_load("input: It's fine   # TODO\n"),
+                         {"input": "It's fine"})
+        self.assertEqual(miniyaml.safe_load("a: don't # why\nb: 1\n"),
+                         {"a": "don't", "b": 1})
+
+    def test_apostrophe_in_a_list_item(self):
+        self.assertEqual(miniyaml.safe_load("- It's fine # c\n- two\n"),
+                         ["It's fine", "two"])
+
+    def test_apostrophe_in_a_comment_is_ignored(self):
+        self.assertEqual(miniyaml.safe_load("a: 5  # it's five\n"), {"a": 5})
+        self.assertEqual(miniyaml.safe_load('a: "x" # it\'s fine\n'), {"a": "x"})
+        self.assertEqual(miniyaml.safe_load("a: 'x' # it's fine\n"), {"a": "x"})
+
+    def test_double_quote_in_a_plain_scalar(self):
+        self.assertEqual(miniyaml.safe_load('a: 5" pipe # size\n'),
+                         {"a": '5" pipe'})
+
+    def test_hash_inside_quotes_is_not_a_comment(self):
+        self.assertEqual(miniyaml.safe_load("a: 'x # y' # real\n"),
+                         {"a": "x # y"})
+        self.assertEqual(miniyaml.safe_load('a: "x # y" # real\n'),
+                         {"a": "x # y"})
+        self.assertEqual(miniyaml.safe_load("a: 'it''s # no' # yes\n"),
+                         {"a": "it's # no"})
+        self.assertEqual(miniyaml.safe_load('a: "q \\" # no" # yes\n'),
+                         {"a": 'q " # no'})
+
+    def test_hash_without_a_space_before_it_is_text(self):
+        self.assertEqual(miniyaml.safe_load("a: x#y\n"), {"a": "x#y"})
+        self.assertEqual(miniyaml.safe_load("u: http://h/p#frag # c\n"),
+                         {"u": "http://h/p#frag"})
+
+    def test_apostrophes_in_a_flow_list(self):
+        self.assertEqual(
+            miniyaml.safe_load("a: [it's, \"x, y\", 'p''q', z]  # c\n"),
+            {"a": ["it's", "x, y", "p'q", "z"]})
+
+    def test_quoted_values_after_a_dash_and_a_colon_still_work(self):
+        self.assertEqual(miniyaml.safe_load("- 'a # b' # c\n"), ["a # b"])
+        self.assertEqual(miniyaml.safe_load("- k: 'a # b' # c\n"),
+                         [{"k": "a # b"}])
+
+    def test_unterminated_quote_is_still_rejected(self):
+        with self.assertRaisesRegex(ValueError, r"unterminated quoted"):
+            miniyaml.safe_load("a: 'oops # c\n")
+
+
+if __name__ == "__main__":
+    unittest.main()

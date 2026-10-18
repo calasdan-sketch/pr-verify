@@ -24,7 +24,15 @@ on whole words and only where an agent actually leaves its name:
    matched with rules 1 and 2 (`Co-Authored-By: Claude
    <noreply@anthropic.com>` matches "claude"). A marker written as
    "co-authored-by: X" in an old config matches X in trailers only.
-4. A subject PREFIX `marker:` (`aider: fix the tests`). The rest of the
+   Two other lines Claude Code leaves count as trailers too: its footer
+   `Generated with [Claude Code](...)` (the text in the brackets is the
+   name) and the `Claude-Session:` trailer (the key alone names Claude).
+4. A marker with an `@` in it is one exact e-mail address, compared
+   whole and without case: `noreply@anthropic.com`. That is how Claude
+   Code's trailer is caught whatever model name it carries --
+   `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>` -- while
+   other people at anthropic.com stay human. It is never read as a name.
+5. A subject PREFIX `marker:` (`aider: fix the tests`). The rest of the
    subject and the body text are never scanned -- prose is not evidence.
 
 `match(...)` returns the marker that matched (shown as `author (marker)`
@@ -42,6 +50,14 @@ _WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
 _TAG_RE = re.compile(r"[\[(]([^\])]*)[\])]")
 _TRAILER_RE = re.compile(r"^\s*([A-Za-z-]+):\s*(.+?)\s*$")
 _ADDR_RE = re.compile(r"^(.*?)\s*<([^>]*)>\s*$")
+#: `<emoji> Generated with [Claude Code](https://claude.com/claude-code)`:
+#: the footer Claude Code puts at the end of a commit message. Nothing but
+#: decoration may come before "Generated with", so a sentence that merely
+#: says so ("I generated this with [Claude Code] ...") is not one.
+_FOOTER_RE = re.compile(r"^[^\w\[]*Generated with \[([^\]]+)\]", re.IGNORECASE)
+#: Trailer keys that name an agent by themselves, whatever their value:
+#: key -> the name it stands for. (`Claude-Session: <url>`)
+_AGENT_KEYS = {"claude-session": "Claude"}
 
 
 def _words(text: str) -> list[str]:
@@ -70,7 +86,7 @@ def _split_marker(marker: str) -> tuple[str, bool]:
 def name_matches(name: str, marker: str) -> bool:
     """Rule 1: author/co-author display name."""
     mw = _marker_words(marker)
-    if not mw or not name:
+    if not mw or not name or "@" in marker:
         return False
     name = name.strip()
     tags = _TAG_RE.findall(name)
@@ -86,10 +102,13 @@ def name_matches(name: str, marker: str) -> bool:
 
 
 def email_matches(email: str, marker: str) -> bool:
-    """Rule 2: author/co-author email."""
+    """Rule 2: author/co-author email. A marker with an `@` in it is a whole
+    address (rule 4)."""
     mw = _marker_words(marker)
     if not mw or not email or "@" not in email:
         return False
+    if "@" in marker:
+        return email.strip().lower() == marker.strip().lower()
     local, _, domain = email.strip().lower().rpartition("@")
     if _words(local) == mw:
         return True
@@ -110,7 +129,14 @@ def _trailers(body: str) -> list[tuple[str, str]]:
     # lines end at "\n", as in git: str.splitlines() would also cut at
     # \x0b \x1e \u2028 ..., so `Co-Authored-By:\x1e Claude <x>` lost its value
     for line in (body or "").split("\n"):
+        footer = _FOOTER_RE.match(line)
+        if footer:
+            out.append((footer.group(1).strip(), ""))
+            continue
         m = _TRAILER_RE.match(line)
+        if m and m.group(1).lower() in _AGENT_KEYS:
+            out.append((_AGENT_KEYS[m.group(1).lower()], ""))
+            continue
         if not m or m.group(1).lower() not in TRAILER_KEYS:
             continue
         value = m.group(2)
@@ -137,7 +163,8 @@ def match(name: str, email: str, subject: str, body: str,
         if not trailer_only:
             if name_matches(name, marker) or email_matches(email, marker):
                 return raw
-            if subject_prefix and _words(subject_prefix) == _marker_words(marker):
+            if (subject_prefix and "@" not in marker
+                    and _words(subject_prefix) == _marker_words(marker)):
                 return raw
         for t_name, t_email in trailers:
             if name_matches(t_name, marker) or email_matches(t_email, marker):

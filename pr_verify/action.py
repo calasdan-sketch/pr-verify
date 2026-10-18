@@ -3,7 +3,9 @@
 The composite action passes every input through a PR_VERIFY_* environment
 variable; this module turns them into the exact CLI flags of `pr-verify
 check`, runs the check, prints the report and writes the outputs
-(score, band, requires-review, exit-code) to $GITHUB_OUTPUT.
+(score, band, requires-review, exit-code) to $GITHUB_OUTPUT. It is started
+by run_action.py in isolated mode (`python -I`), so that the pull request's
+checkout, which is the working directory, can never supply a module.
 
 Mapping (input -> env var -> CLI flag), kept in INPUTS so the test suite
 can assert action.yml and the CLI agree:
@@ -83,8 +85,8 @@ def main(argv: list[str] | None = None, environ: dict | None = None) -> int:
     cli._ensure_repo(args.root)
     try:
         result = cli.run_check(args)
-    except (RuntimeError, ValueError) as e:
-        cli._eprint(f"error: {e}")
+    except cli.CHECK_ERRORS as e:
+        cli._eprint(f"error: {cli.error_text(e)}")
         write_outputs({"exit-code": 2}, env.get("GITHUB_OUTPUT"))
         return 2
     with cli._stdout_may_close():

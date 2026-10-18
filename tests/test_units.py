@@ -236,7 +236,10 @@ class TestConfig(unittest.TestCase):
         parsed = miniyaml.safe_load(config_mod.example_config())
         self.assertEqual(parsed["risk_threshold"], 70)
         self.assertEqual(parsed["timeout"], 300)
-        self.assertIn("python -m pytest -x -q", parsed["gates"])
+        # the template is the defaults, so no gate is switched on by it; a
+        # sample is there as a comment (see TestInitWritesTheRealDefaults)
+        self.assertEqual(parsed["gates"], [])
+        self.assertIn("python -m pytest -x -q", config_mod.example_config())
         self.assertIn("claude", parsed["agent_markers"])
 
 

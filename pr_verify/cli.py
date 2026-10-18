@@ -11,7 +11,8 @@ that tells a senior how deep to review.
 
 Exit status: 1 when the score fails the gate (score >= min-score, see
 --min-score / --fail-on) or any policy gate fails; 2 on usage/config
-errors; 0 otherwise. A reader that stops early (`| head -1`) cuts the
+errors and when git fails or does not answer in time (nothing was
+verified); 0 otherwise. A reader that stops early (`| head -1`) cuts the
 report short but never changes it.
 """
 
@@ -32,10 +33,18 @@ from . import gates as gates_mod
 from . import provenance as prov_mod
 from . import risk as risk_mod
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 
 #: Tried in order when --base is not given (after origin/HEAD).
 BASE_CANDIDATES = ("main", "master", "origin/main", "origin/master")
+
+#: What stops a check before it has a verdict (exit 2, never 1): a bad config
+#: or ref, a git that failed (RuntimeError, ValueError), or a git call that
+#: outlived its timeout (subprocess.TimeoutExpired is a SubprocessError).
+CHECK_ERRORS = (RuntimeError, ValueError, subprocess.SubprocessError)
+
+#: git options that take the next word as their value
+_GIT_OPTIONS_WITH_VALUE = frozenset({"-c", "-C", "--git-dir", "--work-tree"})
 
 
 def _harden_streams() -> None:
@@ -144,6 +153,31 @@ def _out(line: str = "") -> None:
     print(_one_line(line))
 
 
+def _git_command(cmd) -> str:
+    """The git command a call ran: 'blame' for `git -c x=y -C dir blame ...`."""
+    words = ([str(w) for w in cmd] if isinstance(cmd, (list, tuple))
+             else str(cmd).split())
+    i = 1
+    while i < len(words):
+        if words[i] in _GIT_OPTIONS_WITH_VALUE:
+            i += 2
+        elif words[i].startswith("-"):
+            i += 1
+        else:
+            return words[i]
+    return "command"
+
+
+def error_text(exc: BaseException) -> str:
+    """What `error:` says for an exception that stops a check. A git call
+    that outlived its timeout says which one and for how long, not its whole
+    argument list."""
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return (f"git {_git_command(exc.cmd)} did not finish within "
+                f"{exc.timeout:g} seconds")
+    return str(exc)
+
+
 def _eprint(message: str) -> None:
     """A message on stderr, whose reader can go away too (`2>&1 | head -1`):
     the exit status that goes with the message (2) must survive that."""
@@ -189,7 +223,7 @@ def _ensure_repo(root: str) -> None:
                 "command line tool (https://git-scm.com/downloads)")
         sys.exit(2)
     except (OSError, subprocess.SubprocessError) as e:
-        _eprint(f"error: could not run git: {e}")
+        _eprint(f"error: could not run git: {error_text(e)}")
         sys.exit(2)
     if p.returncode != 0:
         _eprint("error: not a git repo")
@@ -221,10 +255,20 @@ def _same_dir(a: str, b: str) -> bool:
                 == os.path.normcase(os.path.abspath(b)))
 
 
-def _rev_ok(root: str, rev: str) -> bool:
+def _resolve_commit(root: str, rev: str) -> str | None:
+    """The full commit id `rev` names, or None. A name that starts with '-'
+    is never one (git does not allow it in a ref) and is not passed on: as
+    an argument it would be an OPTION, `--output=FILE` among them."""
+    if not rev or rev.startswith("-"):
+        return None
     p = subprocess.run(["git", "-C", root, "rev-parse", "--verify", "--quiet",
                         rev + "^{commit}"], capture_output=True, timeout=15)
-    return p.returncode == 0
+    out = p.stdout.decode("ascii", "replace").strip()
+    return out if p.returncode == 0 and out else None
+
+
+def _rev_ok(root: str, rev: str) -> bool:
+    return _resolve_commit(root, rev) is not None
 
 
 def detect_base(root: str) -> str | None:
@@ -305,6 +349,8 @@ def _report_human(result: "CheckResult") -> None:
     breakdown, min_score = result.breakdown, result.min_score
     total_added = sum(f.added for f in prov.values())
     agent_added = sum(f.agent_added for f in prov.values())
+    total_removed = sum(f.removed for f in prov.values())
+    agent_removed = sum(f.agent_removed for f in prov.values())
     _out("═" * 56)
     _out(f"  PR VERIFY  risk {breakdown.score}/100 "
          f"({breakdown.band.upper()})")
@@ -316,16 +362,21 @@ def _report_human(result: "CheckResult") -> None:
         _out(f"  note: {note}")
     _out()
     _out(f"  provenance: {agent_added}/{total_added} added lines "
-         f"agent-authored")
+         f"agent-authored"
+         + (f"; {agent_removed}/{total_removed} removed lines agent-authored"
+            if total_removed else ""))
     for rel in sorted(prov):
         f = prov[rel]
         if f.deleted:
             who = ", ".join(f.deleted_by) or "unknown"
             _out(f"    deleted  {rel} (deleted by {who})")
-        elif f.added:
+        elif f.added or f.removed:
             who = ", ".join(sorted(f.agents)) if f.agents else "human"
-            _out(f"    {f.label():6}  {rel} "
-                 f"({f.agent_added}/{f.added} agent) [{who}]")
+            counts = f"{f.agent_added}/{f.added} agent" if f.added else ""
+            if f.removed:
+                gone = f"{f.agent_removed}/{f.removed} removed agent"
+                counts = f"{counts}, {gone}" if counts else gone
+            _out(f"    {f.label():6}  {rel} ({counts}) [{who}]")
     _out()
     _out("  blast radius:")
     ranked = sorted(blast.values(), key=lambda b: b.size, reverse=True)[:8]
@@ -432,7 +483,8 @@ def run_check(args) -> CheckResult:
             raise RuntimeError(
                 "could not detect the base branch (no origin/HEAD, main, "
                 "master, origin/main or origin/master) — pass --base <ref>")
-    elif not _rev_ok(root, base):
+    base_sha = _resolve_commit(root, base)
+    if base_sha is None:
         raise RuntimeError(f"base ref {base!r} does not exist — pass --base "
                            f"<ref> (tried as given; detection would use: "
                            f"{detect_base(root) or 'nothing found'})")
@@ -463,7 +515,33 @@ def run_check(args) -> CheckResult:
                 notes.append(f"{len(untracked_skipped)} untracked file(s) not "
                              f"verified ({shown}) — `git add` them or pass "
                              f"--include-untracked")
-    prov = prov_mod.analyze(root, base, head, cfg["agent_markers"])
+    head_sha = _resolve_commit(root, head)
+    if head_sha is None:
+        raise RuntimeError(f"head ref {args.head!r} does not exist — pass "
+                           f"--head <ref>")
+    # The range is what THIS branch changed: from the commit where it left
+    # the base, not from the base's tip. A base that moved on after the PR
+    # branched would otherwise show everything it gained as changes in the PR
+    # (reverted ones), and dilute the agent's share.
+    fork = prov_mod.merge_base(root, base_sha, head_sha)
+    if fork is None:
+        notes.append(
+            f"no common ancestor between {base} and {args.head} (unrelated "
+            f"histories, or a shallow clone that does not reach back to where "
+            f"the branch started): verifying against {base} itself, so "
+            f"everything that differs from it is scored - fetch the full "
+            f"history (git fetch --unshallow) for the exact range")
+        diff_base = base_sha
+    else:
+        diff_base = fork
+        if fork != base_sha:
+            ahead = prov_mod._git(root, "rev-list", "--count",
+                                  f"{fork}..{base_sha}").strip()
+            notes.append(
+                f"{base} is {ahead} commit(s) ahead of where this branch "
+                f"left it: verifying from the merge-base {fork[:12]}, so only "
+                f"this branch's own changes are scored")
+    prov = prov_mod.analyze(root, diff_base, head_sha, cfg["agent_markers"])
     if prov:
         blast = br_mod.analyze(root, list(prov.keys()))
         gate_results = (gates_mod.run_gates(root, cfg["gates"], cfg["timeout"])
@@ -481,13 +559,15 @@ def run_check(args) -> CheckResult:
         breakdown = risk_mod.score({}, {}, [], [], 101)
     payload = {
         "tool": "pr-verify", "version": VERSION,
-        "base": base, "base_detected": base_detected, "head": args.head,
+        "base": base, "merge_base": fork, "base_detected": base_detected,
+        "head": args.head,
         "min_score": min_score,
         "notes": notes,
         "untracked_skipped": untracked_skipped,
         "risk": breakdown.as_dict(),
         "files": {
             rel: {"added": f.added, "agent_added": f.agent_added,
+                  "removed": f.removed, "agent_removed": f.agent_removed,
                   "label": f.label(), "agents": sorted(f.agents),
                   "deleted": f.deleted, "deleted_by": f.deleted_by}
             for rel, f in prov.items()},
@@ -525,8 +605,8 @@ def cmd_check(args) -> int:
     _ensure_repo(args.root)
     try:
         result = run_check(args)
-    except (RuntimeError, ValueError) as e:
-        _eprint(f"error: {e}")
+    except CHECK_ERRORS as e:
+        _eprint(f"error: {error_text(e)}")
         return 2
     with _stdout_may_close():
         render(result, args.format)
@@ -543,9 +623,29 @@ def _score_arg(value: str) -> int:
     return n
 
 
+class _Parser(argparse.ArgumentParser):
+    """ArgumentParser that survives a reader that quit (`pr-verify --help |
+    head -0`): the write of its help, usage, version or error text fails
+    with a closed-pipe error, which is not an error of ours.
+
+    Python 3.12 ignores a failed write there; 3.10 lets the OSError out of
+    parse_args. main() absorbs it with _stdout_may_close, which left `args`
+    unassigned (UnboundLocalError, exit 1 and a traceback instead of 0 for
+    --help and --version, 2 for a usage error). Now the exit that argparse
+    was about to make happens on every version."""
+
+    def _print_message(self, message, file=None):
+        try:
+            super()._print_message(message, file)
+        except OSError as e:
+            if not _is_closed_pipe(e):
+                raise
+            _discard(file if file is not None else sys.stderr)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="pr-verify", description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = _Parser(prog="pr-verify", description=__doc__,
+                formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     p.add_argument("--root", default=os.getcwd(),
                    help="Path inside the repository (default: current "
@@ -560,7 +660,10 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--base", default=None,
                    help="Base ref (default: auto-detect — origin/HEAD, then "
                         "main, master, origin/main, origin/master; the "
-                        "report says which was used).")
+                        "report says which was used). The diff starts at "
+                        "the merge-base of BASE and HEAD: only this "
+                        "branch's own changes count, also when BASE has "
+                        "moved on since it branched.")
     c.add_argument("--head", default="HEAD",
                    help="Head ref (default: HEAD, uncommitted changes to "
                         "tracked files included).")

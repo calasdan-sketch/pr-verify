@@ -1120,15 +1120,14 @@ class TestGitAttributes(unittest.TestCase):
         with open(index, "rb") as f:
             before = f.read()
 
-        def scratch_dirs():
-            return {n for n in os.listdir(tempfile.gettempdir())
-                    if n.startswith("pr-verify-")}
-
-        leftovers = scratch_dirs()
-        self.assertLinesSeen(tmp, base)
+        # a private temp dir: other processes (a parallel test run, another
+        # pr-verify) also create and remove scratch files in the shared one
+        private = tempfile.mkdtemp()
+        with mock.patch.object(tempfile, "tempdir", private):
+            self.assertLinesSeen(tmp, base)
         with open(index, "rb") as f:
             self.assertEqual(f.read(), before)
-        self.assertEqual(scratch_dirs(), leftovers)
+        self.assertEqual(os.listdir(private), [])
 
     def test_the_whole_check_sees_the_lines(self):
         tmp, base = _attr_repo("*.py -diff\n")

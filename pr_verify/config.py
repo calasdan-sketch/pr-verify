@@ -7,6 +7,7 @@ own gate config and get it executed on the reviewer's/CI machine.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 
@@ -23,13 +24,18 @@ DEFAULTS = {
     # name only matches a marker covering the whole name ("Claude Code"),
     # so "Claude Dupont", "Cody Smith" and "Tim Abbott" stay human. If your
     # team has a human called Cody or Claude who commits as a single word,
-    # drop that marker and rely on trailers.
+    # drop that marker and rely on trailers. The last one is an exact
+    # address (it has an @), in trailers only: Claude Code signs its commits
+    # `Co-Authored-By: Claude <model name> <noreply@anthropic.com>`, and the
+    # model name changes with every release.
     "agent_markers": [
         "claude", "claude code", "codex", "cursor", "cursor agent",
         "copilot", "github copilot", "bot", "aider", "cody", "devin",
+        "co-authored-by: noreply@anthropic.com",
     ],
     # Globs (repo-relative) for security-sensitive areas. Matched against
-    # the full path and the bare filename (fnmatch). Word-ish on purpose:
+    # the full path and the bare filename (fnmatch), without regard to case
+    # (Login.tsx, PASSWORD.txt). Word-ish on purpose:
     # "*auth*" also caught author.py, "*token*" tokenizer.py and "*key*"
     # monkey.py -- these do not.
     "sensitive_paths": [
@@ -127,24 +133,45 @@ def load(root: str, base: str) -> dict:
     return cfg
 
 
+def _yaml_list(key: str, items: list) -> list[str]:
+    """`key:` and one double-quoted entry per item (JSON strings are YAML
+    strings, and an entry like `co-authored-by: x` needs the quotes)."""
+    if not items:
+        return [f"{key}: []"]
+    return [f"{key}:"] + [f"  - {json.dumps(str(item))}" for item in items]
+
+
 def example_config() -> str:
-    return """# PR Verify config. All fields optional; shown with defaults.
-# This file is read from the BASE ref of the diff (not the worktree), so
-# commit it to your base branch for it to take effect.
-agent_markers:
-  - claude
-  - codex
-  - cursor
-  - copilot
-  - bot
-  - aider
-sensitive_paths:
-  - "**/auth/**"
-  - "**/auth.*"
-  - "**/migrations/**"
-  - "**/*secret*"
-gates:
-  - "python -m pytest -x -q"
-risk_threshold: 70
-timeout: 300
-"""
+    """The text `pr-verify init` writes: DEFAULTS, written out in full, so
+    that committing it changes nothing (it used to carry a handful of the
+    markers and globs and switch the rest off)."""
+    lines = [
+        "# PR Verify config. All fields optional; shown with their defaults.",
+        "# A list given here REPLACES the default list, it does not extend it:",
+        "# delete a field to get its default back.",
+        "# This file is read from the BASE ref of the diff (not the worktree), so",
+        "# commit it to your base branch for it to take effect.",
+        "",
+        "# Names that mark a commit as written by an agent: matched on whole",
+        "# words in the author, in Co-Authored-By / Generated-by trailers and in",
+        "# a subject prefix. An entry with an @ is one exact e-mail address, and",
+        "# an entry starting with co-authored-by: only counts in trailers.",
+        *_yaml_list("agent_markers", DEFAULTS["agent_markers"]),
+        "",
+        "# Globs for security-sensitive files, matched against the repo-relative",
+        "# path and the bare file name, without regard to case.",
+        *_yaml_list("sensitive_paths", DEFAULTS["sensitive_paths"]),
+        "",
+        "# Policy gates: commands run from the repo root, without a shell. A",
+        "# failing gate fails the check. None by default; for example:",
+        "#   gates:",
+        '#     - "python -m pytest -x -q"',
+        *_yaml_list("gates", DEFAULTS["gates"]),
+        "",
+        "# The score at which the check fails (score >= this; --min-score",
+        "# overrides), and the seconds each gate may take.",
+        f"risk_threshold: {DEFAULTS['risk_threshold']}",
+        f"timeout: {DEFAULTS['timeout']}",
+        "",
+    ]
+    return "\n".join(lines)

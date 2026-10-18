@@ -22,14 +22,28 @@ repo root.
 
 ```bash
 cd your-repo
-pr-verify init            # write an example .pr-verify.yaml (then commit it to your base branch)
+pr-verify init            # write .pr-verify.yaml with every default spelled out (commit it to your base branch)
 pr-verify check           # base auto-detected: origin/HEAD, then main, master, origin/main, origin/master
 pr-verify check --base origin/main --format json --min-score 60
 ```
 
 The report says which base was used (`base: master  (auto-detected)`); pass
 `--base <ref>` to choose. Without `git` on PATH or outside a repo the tool
-prints a one-line error and exits 2.
+prints a one-line error and exits 2. So does a git call that fails or does
+not finish in time (60 seconds for the heavy ones, 15 for the small
+lookups): `error: git blame did not finish within 60 seconds`. That is a run
+that could not verify, not the exit 1 of a failed verification.
+
+The diff starts at the **merge-base** of the base and `HEAD`
+(`git merge-base`), not at the base's tip. When `main` moved on after your
+branch left it, what `main` gained is not your PR's change, and counting it
+(as reverted lines in the PR) would dilute the agent's share and hide a
+failing score. The JSON carries that commit as `merge_base`, and the report
+adds a note when the base is ahead of it. If the two share no history
+(unrelated histories, or a shallow clone that does not reach back to the
+fork point) the base itself is used, a note says so and `merge_base` is
+`null`: fetch the full history (`git fetch --unshallow`, or `fetch-depth: 0`
+in the Action) for the exact range.
 
 Start it anywhere inside the repository. The top level is found with `git
 rev-parse --show-toplevel` and everything — paths, blame, the snapshot of
@@ -49,6 +63,22 @@ detected identities shown as `author (marker)` — e.g. `[claude-bot
 (claude)]` or `[Dan Calas (aider)]` — so you can see *why* a line counts
 as agent-written.
 
+**Removed lines count as changed lines.** A line the PR takes out of a file
+is credited to the commit that removed it, as an added line is to the
+commit that wrote it: for each file that lost lines, the commits of the
+range that touched it are looked at, and the lines an agent commit removed
+are the agent's (`files.<name>.removed` / `agent_removed` in the JSON,
+`4/4 removed agent` in the report). An agent that only deletes four lines
+of `auth.py` is no longer "nothing to verify". The agent's removals in a
+file never exceed what the range removes from it in total, so lines an
+agent added and took out again do not count, and the figure is an upper
+bound when agent commits remove each other's lines. A whole deleted file
+keeps its own `deletion` factor and is not counted in lines.
+
+A submodule is a commit id, not a file, so there is nothing to blame in it:
+moving one is a single added line (and a single removed one), credited to
+the last commit of the range that moved the pointer.
+
 Markers match on **whole words** where agents actually sign, never on
 prose:
 
@@ -63,14 +93,27 @@ prose:
   or a domain label (`…@aider.chat`, `…@cursor.com`);
 - `Co-Authored-By:` / `Generated-by:` / `Signed-off-by:` trailers in the
   body, matched by the same rules (`Co-Authored-By: Claude
-  <noreply@anthropic.com>`);
+  <noreply@anthropic.com>`). Two lines Claude Code leaves count as well:
+  its footer `Generated with [Claude Code](...)` (the bracketed text is the
+  name) and the `Claude-Session:` trailer;
+- a marker containing an `@` is one exact address, compared whole and
+  without case, never read as a name. The default
+  `co-authored-by: noreply@anthropic.com` is how Claude Code's own trailer
+  (`Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>` - the model
+  name changes with every release) is caught, in trailers only, while
+  other people at anthropic.com stay human;
 - a `marker:` subject prefix (`aider: fix the tests`).
 
 The rest of the subject and the body are not scanned: "Fix cursor jump in
-editor" is a commit about a cursor, not Cursor's commit. Default markers:
-claude, claude code, codex, cursor, cursor agent, copilot, github copilot,
-bot, aider, cody, devin. If a human on your team commits as a single word
-that is also a marker (`Cody`), drop that marker and rely on trailers.
+editor" is a commit about a cursor, not Cursor's commit, and "paired with
+Claude <noreply@anthropic.com>" in a sentence is not a trailer. Default
+markers: claude, claude code, codex, cursor, cursor agent, copilot, github
+copilot, bot, aider, cody, devin, and the Claude Code address above. If a
+human on your team commits as a single word that is also a marker (`Cody`),
+drop that marker and rely on trailers. A list of `agent_markers` in
+`.pr-verify.yaml` replaces the defaults, it does not extend them: keep
+`"co-authored-by: noreply@anthropic.com"` in it (quoted - it contains a
+colon) to keep catching Claude Code.
 
 Non-ASCII file names (`app/Καλάς.py`) are files of their own: git is run
 with `core.quotePath=false` and quoted diff headers are unescaped, so
@@ -95,6 +138,11 @@ file from the gate by adding `*.py binary` or `*.py -diff`, and `diff`
 cannot turn a real binary into a pile of added lines. `git blame` ignores
 a `blame.ignoreRevsFile` for the same reason (that file is in the PR too).
 
+`--base` and `--head` name commits, and a name that starts with `-` is
+refused before git sees it (`error: head ref '--output=FILE' does not
+exist`): git would read it as an option, and `--head=--output=FILE` used to
+make it write its patch into FILE.
+
 What the report prints is that text again — file names, author names, the
 name of a deleted file — and a terminal acts on some of it: an escape
 sequence recolors the screen or rewrites what is already there, a carriage
@@ -118,7 +166,14 @@ y`, resolved against the importing file's own package), `from pkg import
 submodule`, and `src/` layouts (`src/pkg/core.py` answers to `pkg.core`);
 JS/TS/Go/Rust/Java/Ruby/PHP via heuristic fallback. Those file types are
 read from the worktree; `node_modules`, `vendor`, `build`, `dist`, `venv`,
-`.venv`, `.tox`, `__pycache__` and `.git` are skipped.
+`.venv`, `.tox`, `__pycache__` and `.git` are skipped. Only regular files
+are opened, and none over 4 MiB: a symbolic link (a PR can commit `evil.py
+-> /dev/zero`), a named pipe or a device is left alone, and a larger file
+stays in the graph without the imports it makes. A Python file the parser
+cannot read (a syntax error, or an expression nested or chained too deep for
+it) makes none either. The worktree is read once per run, however many files
+the PR deleted (each deleted file used to cost another full scan: 300 of
+them in a 2,000-file repository took minutes).
 
 A changed file the graph does not contain says why, instead of a bare "0
 downstream dependent(s)". The JSON carries the same as a code in
@@ -158,7 +213,7 @@ A failing gate fails the verification (exit 1) and the report ends with
 
 | Factor | Max | What it measures |
 |---|---|---|
-| agent_share | 40 | % of added lines agent-authored |
+| agent_share | 40 | % of changed (added + removed) lines agent-authored |
 | blast | 25 | log-scaled transitive dependents |
 | sensitive | 20 | changed files under sensitive globs (auth, crypto, payments, migrations, secrets…); deleted files match like touched ones |
 | gates | 10 | any policy gate failed |
@@ -171,9 +226,12 @@ Test files are recognised by path component (`tests/`, `test/`,
 `attestation.py` are source. The default sensitive globs are word-ish on
 purpose (`**/auth.*`, `**/auth/**`, `**/*_key.*`, `**/*token.*`,
 `**/*secret*`, `**/.env*`…): `author.py`, `monkey.py` and `tokenizer.py`
-do not match; `api_key.py`, `auth_token.py` and `.env.local` do. See
-`DEFAULTS` in `config.py` for the full list and override
-`sensitive_paths` in your config.
+do not match; `api_key.py`, `auth_token.py` and `.env.local` do. Globs
+match without regard to case, so `Login.tsx`, `PASSWORD.txt` and
+`src/Auth/Index.ts` count. See `DEFAULTS` in `config.py` for the full list
+and override `sensitive_paths` in your config; `pr-verify init` writes
+every default out, so the file it creates changes nothing until you edit
+it. A list in the config replaces the default list, it does not extend it.
 
 Bands: 0–29 low · 30–69 medium · 70–100 high — labels only, they never
 decide pass/fail. The formula is documented so teams can argue with it and
@@ -259,10 +317,22 @@ default branch is `master`; pin to it (or to a tag once one exists):
     root: ""               # --root (empty = the checked-out repo)
 ```
 
-Outputs: `score`, `band`, `requires-review`, `exit-code`. The step installs
-the action's own checkout with pip and runs `python -m pr_verify.action`,
-which maps each input to the matching CLI flag — the test suite parses
-`action.yml` and asserts that mapping stays true.
+Outputs: `score`, `band`, `requires-review`, `exit-code`. The step runs
+`python -I "$GITHUB_ACTION_PATH/run_action.py"`, which maps each input to
+the matching CLI flag — the test suite parses `action.yml` and asserts that
+mapping stays true.
+
+The PR's checkout is the step's working directory, and it is only ever
+data. Python's isolated mode (`-I`) keeps the working directory off the
+import path and ignores `PYTHONPATH`, so a pull request that adds its own
+`argparse.py`, `json.py` or `pr_verify/` package gets nothing run (a test
+plants exactly those, commits them to a PR and runs the step as written).
+Nothing is installed with pip either. No `${{ }}` expression is ever
+written into a script: inputs reach the step as environment variables.
+The gates in `.pr-verify.yaml` do run the PR's code, which is what a test
+gate is for; they come from the base ref, which the PR cannot change. On
+Windows the launcher also stops the working directory from being searched
+for `git.exe` and other programs by bare name.
 
 ## Example output
 
@@ -311,7 +381,21 @@ which maps each input to the matching CLI flag — the test suite parses
   cannot hide a source file by marking it `binary` or `-diff`. Attributes
   you set yourself in `.git/info/attributes` or a global attributes file
   still apply.
+- Which commit removed a line is worked out per commit and per file name,
+  so a file that is renamed inside the PR hides its earlier removals from
+  the attribution: they read as human. And when agent commits remove each
+  other's lines the agent's removal count is an upper bound.
 - Non-Python blast-radius extraction is heuristic.
+- The blast radius does not follow symbolic links and reads no source file
+  larger than 4 MiB for its imports (such a file is still in the graph and
+  still has dependents).
+- On Python 3.10 a Python file that is one expression with some 200,000
+  terms (`a+a+a+...`) crashes the interpreter inside `ast.parse`, a CPython
+  bug fixed in 3.11. The run then ends with the signal (exit 139 on Linux)
+  and no verdict: that fails a CI job, it cannot pass one. Use Python 3.11
+  or newer for pull requests you do not trust.
+- The time limits on git calls (60 seconds, 15 for lookups) are fixed: on a
+  repository where one is not enough the run stops with exit 2.
 - The blast radius is read from the files in the worktree, whatever
   `--head` says: to verify a branch other than the checked-out one, check
   it out.
@@ -345,3 +429,9 @@ that tries to forge git's own records (separators in commit messages and
 file lines) or the report itself (control characters and newlines in
 names), JSON for a range with nothing to verify, and a scan of the
 repository's own files for invisible characters.
+
+This repo's own CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml))
+runs the suite on Ubuntu, Windows and macOS with Python 3.11, 3.12 and
+3.13, and on Python 3.10 (the oldest supported) on Ubuntu. That floor
+matters: argparse on 3.10 does not ignore a failed write of its help text,
+so `--help | head -0` needed its own handling there.

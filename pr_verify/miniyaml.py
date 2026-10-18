@@ -22,6 +22,10 @@ Strictness notes:
     rejected instead of silently misparsed.
   - Nesting deeper than MAX_DEPTH (50) raises ValueError, never
     RecursionError.
+  - A quote opens a quoted scalar only where a scalar starts (line start,
+    after "- ", after ": ", inside a flow list after "[" or ","). Anywhere
+    else ("It's fine   # note") it is an ordinary character: it does not
+    hide a trailing "#" comment and does not break a flow list.
 """
 
 from __future__ import annotations
@@ -40,15 +44,50 @@ def _err(msg: str, lineno: int) -> ValueError:
 
 
 def _strip_comment(line: str) -> str:
-    in_s = in_d = False
-    for i, ch in enumerate(line):
-        if ch == "'" and not in_d:
-            in_s = not in_s
-        elif ch == '"' and not in_s:
-            in_d = not in_d
-        elif ch == "#" and not in_s and not in_d:
-            if i == 0 or line[i - 1] in " \t":
-                return line[:i]
+    """Drop a trailing "# comment" (a "#" at the start or after a space).
+
+    "#" inside a quoted scalar is text. A quote opens a quoted scalar only
+    where a scalar starts, so the apostrophe in "It's fine   # TODO" does
+    not hide the comment. Inside quotes a doubled '' is one quote (single)
+    and a backslash escapes the next character (double).
+    """
+    quote = ""      # the opening quote of the quoted scalar we are inside
+    start = True    # a scalar can start here
+    flow = False    # inside a [flow list]
+    i, n = 0, len(line)
+    while i < n:
+        ch = line[i]
+        if quote:
+            if quote == '"' and ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                if quote == "'" and line[i + 1:i + 2] == "'":
+                    i += 2
+                    continue
+                quote = ""
+            i += 1
+            continue
+        if ch in " \t":
+            i += 1
+            continue                      # whitespace keeps `start` as it is
+        if ch in "'\"" and start:
+            quote = ch
+            start = False
+        elif ch == "#" and (i == 0 or line[i - 1] in " \t"):
+            return line[:i]
+        elif ch == "[" and start:
+            flow = start = True
+        elif ch == "]" and flow:
+            flow = start = False
+        elif ch == "," and flow:
+            start = True
+        elif ch in "-:" and line[i + 1:i + 2] in ("", " ", "\t") and (
+                ch == ":" or start):
+            start = True                  # "- " or ": " - a scalar follows
+        else:
+            start = False
+        i += 1
     return line
 
 
@@ -143,20 +182,35 @@ def _flow_list(s: str, lineno: int) -> list:
     inner = s.strip()[1:-1].strip()
     if not inner:
         return []
-    raw_items, cur, in_s, in_d = [], "", False, False
-    for ch in inner:
-        if ch == "'" and not in_d:
-            in_s = not in_s
+    # A quote opens a quoted item only at the start of an item ("it's" and
+    # 5" are plain scalars); inside quotes a comma is text.
+    raw_items, cur, quote, start = [], "", "", True
+    i, n = 0, len(inner)
+    while i < n:
+        ch = inner[i]
+        if quote:
             cur += ch
-        elif ch == '"' and not in_s:
-            in_d = not in_d
-            cur += ch
-        elif ch == "," and not in_s and not in_d:
+            if quote == '"' and ch == "\\" and i + 1 < n:
+                cur += inner[i + 1]
+                i += 2
+                continue
+            if ch == quote:
+                if quote == "'" and inner[i + 1:i + 2] == "'":
+                    cur += "'"
+                    i += 2
+                    continue
+                quote = ""
+        elif ch == ",":
             raw_items.append(cur)
-            cur = ""
+            cur, start = "", True
         else:
+            if ch in "'\"" and start:
+                quote = ch
+            if ch not in " \t":
+                start = False
             cur += ch
-    if in_s or in_d:
+        i += 1
+    if quote:
         raise _err(f"unterminated quote in flow list: {s}", lineno)
     raw_items.append(cur)
     out = []
