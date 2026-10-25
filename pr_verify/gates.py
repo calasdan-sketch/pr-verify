@@ -13,7 +13,8 @@ tokens stripped), and argv[0] is resolved with `shutil.which` because
 CreateProcess does not look up PATHEXT shims (`npx.cmd`, `npm.cmd`,
 `tsc.cmd`) -- by a search of PATH that, on Windows, leaves out the working
 directory and the pull request's checkout (see `_which_outside`: a file the
-PR adds cannot take the place of the gate's program). A gate may also be given as a YAML list, which is used as the
+PR adds cannot take the place of the gate's program; a name found nowhere
+else is a failed gate, exit 127, never a search of the checkout). A gate may also be given as a YAML list, which is used as the
 argv without any splitting.
 """
 
@@ -60,9 +61,26 @@ def _on_windows() -> bool:
     return os.name == "nt"
 
 
-def _same_dir(a: str, b: str) -> bool:
-    return os.path.normcase(os.path.realpath(a)) == \
-        os.path.normcase(os.path.realpath(b))
+class ProgramNotFound(OSError):
+    """On Windows: a gate's program is on no trusted PATH entry. Raised
+    instead of handing the bare name to CreateProcess, which would search the
+    parent's working directory (the pull request's checkout) first."""
+
+
+def _inside(directory: str, parent: str) -> bool:
+    """True when `directory` is `parent` or lies under it. A filesystem root
+    only matches itself (a working directory of `C:\\` must not bar all of
+    PATH)."""
+    d = os.path.normcase(os.path.realpath(directory))
+    p = os.path.normcase(os.path.realpath(parent))
+    if d == p:
+        return True
+    if os.path.dirname(p) == p:  # parent is a root
+        return False
+    try:
+        return os.path.commonpath([d, p]) == p
+    except ValueError:  # different drives
+        return False
 
 
 def _which_outside(name: str, root: str | None) -> str | None:
@@ -72,8 +90,8 @@ def _which_outside(name: str, root: str | None) -> str | None:
     that; only Python 3.12+ honours NoDefaultCurrentDirectoryInExePath), so a
     pull request that adds `python.bat` or `npx.cmd` at its root would run
     that file as the gate's program. Here PATH is walked as written, minus
-    the empty and `.` entries and the directories of the checkout the gate
-    runs in (`root`) and of the working directory. A program inside the
+    the empty and relative entries and every directory at or below the
+    checkout the gate runs in (`root`) or the working directory. A program inside the
     repository is run with a path (`.\\tool.exe`), which is not looked up."""
     if os.path.dirname(name) or (os.path.altsep and os.path.altsep in name):
         return shutil.which(name)
@@ -86,9 +104,9 @@ def _which_outside(name: str, root: str | None) -> str | None:
     barred = [d for d in (root, os.getcwd()) if d]
     for directory in os.environ.get("PATH", "").split(os.pathsep):
         directory = directory.strip('"')
-        if not directory or directory == os.curdir:
+        if not directory or not os.path.isabs(directory):
             continue
-        if any(_same_dir(directory, b) for b in barred):
+        if any(_inside(directory, b) for b in barred):
             continue
         for fn in files:
             candidate = os.path.join(directory, fn)
@@ -101,13 +119,21 @@ def resolve_executable(argv: list[str], root: str | None = None
                        ) -> list[str]:
     """argv with argv[0] looked up on PATH (PATHEXT-aware on Windows, where
     neither the working directory nor the checkout at `root` is searched).
-    Unresolvable names are left alone so the OS error names them."""
+    Elsewhere an unresolvable name is left alone so the OS error names it;
+    on Windows it raises ProgramNotFound (a bare name handed to CreateProcess
+    would be searched for in the checkout)."""
     if not argv:
         return argv
-    found = (_which_outside(argv[0], root) if _on_windows()
-             else shutil.which(argv[0]))
+    win = _on_windows()
+    found = _which_outside(argv[0], root) if win else shutil.which(argv[0])
     if found:
         return [found, *argv[1:]]
+    if win and not (os.path.dirname(argv[0]) or
+                    (os.path.altsep and os.path.altsep in argv[0])):
+        raise ProgramNotFound(
+            f"{argv[0]!r} was not found on PATH (the pull request's "
+            "checkout is never searched; run a program from the repository "
+            "with a path such as .\\tool.exe)")
     return argv
 
 
@@ -129,6 +155,11 @@ def run_gates(root: str, commands: list,
             results.append(GateResult(
                 command=display(cmd), passed=False, returncode=127,
                 output_tail=f"gate could not be parsed: {e}"[-2000:]))
+            continue
+        except ProgramNotFound as e:
+            results.append(GateResult(
+                command=display(cmd), passed=False, returncode=127,
+                output_tail=f"gate could not run: {e}"[-2000:]))
             continue
         if not argv:
             continue

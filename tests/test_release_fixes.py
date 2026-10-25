@@ -131,12 +131,13 @@ class TestWindowsProgramLookup(unittest.TestCase):
             os.chdir(cwd)
         self.assertEqual(argv, [os.path.join(self.tools, "mytool.cmd")])
 
-    def test_a_name_that_is_nowhere_but_in_the_checkout_stays_unresolved(self):
+    def test_a_name_that_is_nowhere_but_in_the_checkout_is_not_found(self):
+        # was: returned the bare name, which CreateProcess searches for in
+        # the parent's working directory (the checkout).
         with mock.patch.dict(os.environ, {"PATH": os.pathsep.join(
                 ["", os.curdir, self.checkout])}):
-            self.assertEqual(
-                gates_mod.resolve_executable(["mytool"], self.checkout),
-                ["mytool"])
+            with self.assertRaises(gates_mod.ProgramNotFound):
+                gates_mod.resolve_executable(["mytool"], self.checkout)
 
     def test_a_path_is_taken_as_written(self):
         explicit = os.path.join(self.checkout, "mytool.bat")
@@ -166,8 +167,10 @@ class TestWindowsProgramLookup(unittest.TestCase):
             self.win.start()
 
     def test_the_readme_says_so(self):
-        self.assertIn("neither the working directory nor the pull request",
-                      _read("README.md"))
+        readme = " ".join(_read("README.md").split())
+        self.assertIn("neither the working directory, the pull request's "
+                      "checkout (or anything below it) nor a relative", readme)
+        self.assertIn("fails the gate with exit 127", readme)
 
 
 class TestRootAfterTheSubcommand(unittest.TestCase):

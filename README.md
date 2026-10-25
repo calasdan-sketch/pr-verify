@@ -249,9 +249,11 @@ interpreted. A gate is a command string (split with the platform's rules —
 on Windows `C:\Python311\python.exe -m pytest` keeps its backslashes and
 `npx`/`npm`/`tsc` `.cmd` shims are found through `PATHEXT`) or a YAML list
 used as the argv as-is. On Windows the program is looked up in `PATH` only:
-neither the working directory nor the pull request's checkout is searched, so
-a `python.bat` or `npx.cmd` added by a PR cannot stand in for the gate's
-program (to run a file from the repository, give its path: `.\tool.exe`).
+neither the working directory, the pull request's checkout (or anything
+below it) nor a relative `PATH` entry is searched, so a `python.bat` or
+`npx.cmd` added by a PR cannot stand in for the gate's program. A program
+found nowhere else fails the gate with exit 127 (to run a file from the
+repository, give its path: `.\tool.exe`).
 
 ```yaml
 gates:

@@ -33,7 +33,7 @@ from . import gates as gates_mod
 from . import provenance as prov_mod
 from . import risk as risk_mod
 
-VERSION = "0.1.4"
+VERSION = "0.1.5"
 
 #: Tried in order when --base is not given (after origin/HEAD).
 BASE_CANDIDATES = ("main", "master", "origin/main", "origin/master")

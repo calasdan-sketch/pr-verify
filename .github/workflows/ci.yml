@@ -53,3 +53,14 @@ jobs:
           python -m venv "$RUNNER_TEMP/wheel-venv"
           "$RUNNER_TEMP/wheel-venv/bin/pip" install dist/*.whl
           "$RUNNER_TEMP/wheel-venv/bin/pr-verify" --version
+      # What PyPI users get as the source distribution must carry and pass its
+      # own tests: unpack it, install it in a clean venv, run the suite.
+      - name: Run the tests from the sdist
+        run: |
+          set -e
+          mkdir "$RUNNER_TEMP/sdist"
+          tar -xzf dist/*.tar.gz -C "$RUNNER_TEMP/sdist" --strip-components=1
+          python -m venv "$RUNNER_TEMP/sdist-venv"
+          "$RUNNER_TEMP/sdist-venv/bin/python" -m pip install dist/*.tar.gz
+          cd "$RUNNER_TEMP/sdist"
+          "$RUNNER_TEMP/sdist-venv/bin/python" -m unittest discover -s tests

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.5
+
+- Windows: a gate whose program is found on no trusted `PATH` entry now fails
+  with exit 127 and a one-line reason. Before, the bare name went to
+  CreateProcess, which searches the parent's working directory first, so a
+  `python.bat` added by the pull request could still run.
+- Windows: the gate-program search also skips every subdirectory of the
+  checkout and of the working directory (for example `node_modules\.bin`) and
+  every relative `PATH` entry, not only the exact checkout directory.
+
 ## 0.1.4
 
 - A pull request can no longer make `pr-verify check` hang: a Ruby file with a
@@ -7,7 +17,8 @@
   minutes (quadratic matching); it is now read in linear time.
 - On Windows a gate's program is looked up in `PATH` only, not in the working
   directory or the pull request's checkout, whatever the Python version: a
-  `python.bat` or `npx.cmd` in the PR cannot replace the program a gate runs.
+  `python.bat` or `npx.cmd` in the PR cannot replace the program a gate runs
+  (0.1.5 closes the case where the name was found nowhere).
 - Package page on PyPI: author, repository link and the Python 3.14 classifier.
 - CI on Linux, Windows and macOS with Python 3.10, 3.12 and 3.14, a package
   job (build, `twine check --strict`, install the wheel) and a release
