@@ -1260,6 +1260,47 @@ class TestActionComment(unittest.TestCase):
         self.gh = FakeGitHub()
         self.addCleanup(self.gh.close)
 
+    def test_a_redirect_is_not_followed_so_the_token_stays_put(self):
+        trap_hits = []
+
+        class Trap(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                trap_hits.append(dict(self.headers))
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"[]")
+
+        trap = ThreadingHTTPServer(("127.0.0.1", 0), Trap)
+        threading.Thread(target=trap.serve_forever, daemon=True).start()
+        self.addCleanup(trap.server_close)
+        self.addCleanup(trap.shutdown)
+
+        class Redirector(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                self.send_response(307)
+                self.send_header(
+                    "Location", f"http://127.0.0.1:{trap.server_address[1]}/x")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        red = ThreadingHTTPServer(("127.0.0.1", 0), Redirector)
+        threading.Thread(target=red.serve_forever, daemon=True).start()
+        self.addCleanup(red.server_close)
+        self.addCleanup(red.shutdown)
+        gh = type("G", (), {"url": f"http://127.0.0.1:{red.server_address[1]}"})
+        out = action_mod.post_comment("x " + render_mod.STICKY_MARKER,
+                                      action_env(gh))
+        self.assertTrue(out.startswith("skipped") or "could not" in out
+                        or "failed" in out, out)
+        self.assertEqual(trap_hits, [])
+
     def test_creates_a_comment_the_first_time(self):
         out = action_mod.post_comment("hello " + render_mod.STICKY_MARKER,
                                       action_env(self.gh))
@@ -1275,6 +1316,25 @@ class TestActionComment(unittest.TestCase):
         self.assertTrue(out.startswith("updated comment"))
         self.assertEqual(len(self.gh.comments), 1)
         self.assertTrue(self.gh.comments[0]["body"].startswith("v2"))
+
+    def test_a_marker_pasted_by_someone_else_does_not_block_ours(self):
+        self.gh.comments = [{"id": 7, "body": "mine now " + render_mod.STICKY_MARKER},
+                            {"id": 8, "body": "ours " + render_mod.STICKY_MARKER}]
+        # the server refuses edits to comment 7 (not the token's)
+        orig = self.gh.server.RequestHandlerClass
+        gh = self.gh
+
+        class Picky(orig):
+            def handle_any(self, method):
+                if method == "PATCH" and self.path.endswith("/7"):
+                    gh.requests.append((method, self.path, {}, None))
+                    return self._send(403, {"message": "not yours"})
+                return orig.handle_any(self, method)
+        self.gh.server.RequestHandlerClass = Picky
+        out = action_mod.post_comment("v2 " + render_mod.STICKY_MARKER,
+                                      action_env(self.gh))
+        self.assertEqual(out, "updated comment 8")
+        self.assertTrue(self.gh.comments[0]["body"].startswith("mine now"))
 
     def test_finds_the_comment_on_a_later_page(self):
         self.gh.comments = [{"id": i, "body": "x"} for i in range(1, 150)]

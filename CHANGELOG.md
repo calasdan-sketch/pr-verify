@@ -9,7 +9,9 @@
 - The GitHub Action can post that comment (one comment, updated on every
   push; `comment: "true"`, needs `pull-requests: write`), add it to the job
   summary, and write the SARIF file (`sarif-file`). No new dependency: the
-  standard library does the HTTP. New inputs: `comment`, `github-token`,
+  standard library does the HTTP, the token is never sent anywhere a redirect
+  points, and a comment that merely contains the marker (anyone can paste it)
+  cannot block the real one. New inputs: `comment`, `github-token`,
   `step-summary`, `sarif-file`.
 - Agent detection beyond commit trailers: PR labels (`agent_labels`), bot
   accounts (`agent_authors`), branch patterns `claude/*`, `copilot/*`,

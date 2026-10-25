@@ -165,6 +165,17 @@ class _ApiError(Exception):
         self.status = status
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: urllib would send the token to wherever the
+    answer points. The GitHub API answers where it was asked."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
 def _call(method: str, url: str, token: str, body: dict | None = None):
     data = None if body is None else json.dumps(body).encode("utf-8")
     req = urllib.request.Request(url, data=data, method=method, headers={
@@ -174,7 +185,7 @@ def _call(method: str, url: str, token: str, body: dict | None = None):
         "User-Agent": "pr-verify",
         **({"Content-Type": "application/json"} if data else {})})
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with _OPENER.open(req, timeout=20) as resp:
             raw = resp.read(8 * 1024 * 1024)
     except urllib.error.HTTPError as e:
         detail = ""
@@ -220,18 +231,20 @@ def post_comment(markdown: str, env) -> str:
         return "skipped: GITHUB_API_URL is not https"
     issue = f"{api}/repos/{repo}/issues/{number}/comments"
     try:
-        existing = None
+        found = []
         for page in range(1, 11):
             batch = _call("GET", f"{issue}?per_page=100&page={page}", token)
             if not isinstance(batch, list):
                 break
-            existing = next((c for c in batch if isinstance(c, dict)
-                             and render_mod.STICKY_MARKER in
-                             str(c.get("body", ""))
-                             and isinstance(c.get("id"), int)), None)
-            if existing or len(batch) < 100:
+            found += [c for c in batch if isinstance(c, dict)
+                      and render_mod.STICKY_MARKER in str(c.get("body", ""))
+                      and isinstance(c.get("id"), int)]
+            if len(batch) < 100:
                 break
-        if existing:
+        # Anyone can paste the marker into a comment of their own. Edit the
+        # first one this token is allowed to edit (403/404 means it is not
+        # ours, or is gone); if none is, add our own.
+        for existing in found[:5]:
             try:
                 _call("PATCH", f"{api}/repos/{repo}/issues/comments/"
                       f"{existing['id']}", token, {"body": markdown})
@@ -239,7 +252,6 @@ def post_comment(markdown: str, env) -> str:
             except _ApiError as e:
                 if e.status not in (403, 404):
                     raise
-                # not ours to edit (someone else's, or a deleted one): a new one
         made = _call("POST", issue, token, {"body": markdown})
         return f"created comment {made.get('id') if isinstance(made, dict) else '?'}"
     except _ApiError as e:
