@@ -11,9 +11,12 @@ gates pass.
 Stdlib only, Python 3.10+, needs the `git` command line tool on PATH.
 
 ```bash
-pip install git+https://github.com/calasdan-sketch/pr-verify
+pip install pr-verify
 pr-verify check
 ```
+
+From source (the latest, unreleased code):
+`pip install git+https://github.com/calasdan-sketch/pr-verify`
 
 Or run from a checkout without installing: `python3 -m pr_verify` from the
 repo root.
@@ -59,7 +62,7 @@ Start it anywhere inside the repository. The top level is found with `git
 rev-parse --show-toplevel` and everything — paths, blame, the snapshot of
 uncommitted changes, the blast-radius scan, the gates (which run from the
 top level) — is computed from there, so `pr-verify check` run from `src/`
-gives the same report as from the root. `--root <path>` takes any path
+gives the same report as from the root. `--root <path>` (before or after the subcommand) takes any path
 inside the repository, a subdirectory included, and still verifies the
 whole repository; the report adds a note when the top level is not the
 directory you gave. `pr-verify init` writes `.pr-verify.yaml` at the top
@@ -245,7 +248,10 @@ shell — `;`, `&&`, `$()`, pipes and the rest are literal arguments, never
 interpreted. A gate is a command string (split with the platform's rules —
 on Windows `C:\Python311\python.exe -m pytest` keeps its backslashes and
 `npx`/`npm`/`tsc` `.cmd` shims are found through `PATHEXT`) or a YAML list
-used as the argv as-is:
+used as the argv as-is. On Windows the program is looked up in `PATH` only:
+neither the working directory nor the pull request's checkout is searched, so
+a `python.bat` or `npx.cmd` added by a PR cannot stand in for the gate's
+program (to run a file from the repository, give its path: `.\tool.exe`).
 
 ```yaml
 gates:
@@ -539,7 +545,7 @@ names), JSON for a range with nothing to verify, and a scan of the
 repository's own files for invisible characters.
 
 This repo's own CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml))
-runs the suite on Ubuntu, Windows and macOS with Python 3.11, 3.12 and
-3.13, and on Python 3.10 (the oldest supported) on Ubuntu. That floor
-matters: argparse on 3.10 does not ignore a failed write of its help text,
+runs the suite on Ubuntu, Windows and macOS with Python 3.10 (the oldest
+supported), 3.12 and 3.14, and a second job builds the package, runs
+`twine check --strict` and installs the wheel. That floor matters: argparse on 3.10 does not ignore a failed write of its help text,
 so `--help | head -0` needed its own handling there.

@@ -33,7 +33,7 @@ from . import gates as gates_mod
 from . import provenance as prov_mod
 from . import risk as risk_mod
 
-VERSION = "0.1.3"
+VERSION = "0.1.4"
 
 #: Tried in order when --base is not given (after origin/HEAD).
 BASE_CANDIDATES = ("main", "master", "origin/main", "origin/master")
@@ -698,13 +698,22 @@ def build_parser() -> argparse.ArgumentParser:
                         "verified, also when this is a subdirectory.")
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    def root_after(parser):
+        # `pr-verify check --root X` means the same as `pr-verify --root X
+        # check` (the Action's input is called root); SUPPRESS keeps the
+        # value given before the subcommand when this one is left out.
+        parser.add_argument("--root", default=argparse.SUPPRESS,
+                            help="Same as --root before the subcommand.")
+
     i = sub.add_parser("init", help="Write example .pr-verify.yaml.")
+    root_after(i)
     i.add_argument("--force", action="store_true",
                    help="Overwrite a .pr-verify.yaml that is already there "
                         "(without it init leaves the file alone and exits "
                         "2).")
 
     c = sub.add_parser("check", help="Verify a diff range.")
+    root_after(c)
     c.add_argument("--base", default=None,
                    help="Base ref (default: auto-detect — origin/HEAD, then "
                         "main, master, origin/main, origin/master; the "

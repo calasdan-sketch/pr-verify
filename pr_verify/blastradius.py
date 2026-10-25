@@ -89,8 +89,10 @@ _JS_IMPORT_RES = (
     # require('m')
     re.compile(r'\brequire\s*\(\s*["\']([^"\']+)["\']\s*\)'),
 )
+# `(?:\(\s*)?` and not `\s*\(?\s*`: two whitespace runs side by side let a
+# line of `require_relative` and N spaces be split N ways at every start (N^2).
 _RUBY_IMPORT_RE = re.compile(
-    r'^\s*require_relative\b\s*\(?\s*["\']([^"\']+)["\']')
+    r'^\s*require_relative\b\s*(?:\(\s*)?["\']([^"\']+)["\']')
 #: import a.b.C; | import static a.b.C.m; | import a.b.*;
 _JAVA_IMPORT_RE = re.compile(
     r'^\s*import\s+(?:static\s+)?'

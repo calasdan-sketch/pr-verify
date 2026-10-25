@@ -3,6 +3,8 @@
 # Every module under tests/ goes in -- fixture.py is imported by most of them --
 # so an unpacked sdist runs its own tests.
 include .github/workflows/ci.yml
+include .github/workflows/release.yml
+include CHANGELOG.md
 include action.yml
 include run_action.py
 recursive-include tests *.py
