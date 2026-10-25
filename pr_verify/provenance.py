@@ -202,6 +202,9 @@ class FileProvenance:
     #: `deleted`, not this), and how many of those an agent's commit removed
     removed: int = 0
     agent_removed: int = 0
+    #: the added lines (numbers at head) credited to an agent: what the
+    #: test-integrity check looks at, so it only reports an agent's lines
+    agent_lines: list = dataclasses.field(default_factory=list)
 
     @property
     def changed(self) -> int:
@@ -656,7 +659,17 @@ def agent_label(name: str, marker: str) -> str:
 
 
 def analyze(root: str, base: str, head: str = "HEAD",
-            agent_markers: list[str] | None = None) -> dict[str, FileProvenance]:
+            agent_markers: list[str] | None = None,
+            pr_signal: str | None = None,
+            trailer_keys: dict[str, str] | None = None
+            ) -> dict[str, FileProvenance]:
+    """Who wrote what between base and head.
+
+    `pr_signal` is the label of an agent signal from the pull request itself
+    (prinfo.signal_marker: `branch:claude/fix`): when given, every commit of
+    the range counts as an agent's, credited to that signal unless a marker
+    matched the commit already. `trailer_keys` are the trailer keys that name
+    an agent by themselves (markers.parse_trailer_keys)."""
     agent_markers = [str(m).lower() for m in (agent_markers or [])]
     added, removed = _scan_patch(_patch(root, base, head))
     added = {rel: lines for rel, lines in added.items() if rel != CONFIG_FILE}
@@ -689,9 +702,12 @@ def analyze(root: str, base: str, head: str = "HEAD",
     texts = _commit_text(root, all_shas)
     matched: dict[str, str] = {}   # sha -> marker that identified it
     for sha, (name, email, subject, body) in texts.items():
-        hit = markers_mod.match(name, email, subject, body, agent_markers)
+        hit = markers_mod.match(name, email, subject, body, agent_markers,
+                                trailer_keys)
         if hit:
             matched[sha] = hit
+        elif pr_signal:
+            matched[sha] = pr_signal
     # file -> {agent commit: base lines it removed from the file}
     agent_removals: dict[str, dict[str, int]] = {}
     agent_removers = [(sha, parent) for sha, parent in removers
@@ -721,6 +737,7 @@ def analyze(root: str, base: str, head: str = "HEAD",
             sha = bm.get(ln)
             if sha in matched:
                 fp.agent_added += 1
+                fp.agent_lines.append(ln)
                 fp.agents.add(agent_label(who(sha), matched[sha]))
             else:
                 fp.human_added += 1

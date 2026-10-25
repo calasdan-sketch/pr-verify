@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.2.0
+
+- `--format sarif` prints a SARIF 2.1.0 log and `--format comment` the markdown
+  of a sticky pull request comment whose headline is `Review depth:
+  skim|normal|deep`, a pure function of the facts in the JSON. `--sarif-file`
+  and `--comment-file` write them beside any format.
+- The GitHub Action can post that comment (one comment, updated on every
+  push; `comment: "true"`, needs `pull-requests: write`), add it to the job
+  summary, and write the SARIF file (`sarif-file`). No new dependency: the
+  standard library does the HTTP. New inputs: `comment`, `github-token`,
+  `step-summary`, `sarif-file`.
+- Agent detection beyond commit trailers: PR labels (`agent_labels`), bot
+  accounts (`agent_authors`), branch patterns `claude/*`, `copilot/*`,
+  `cursor/*`, `codex/*` (`agent_branches`) and configurable trailer keys
+  (`agent_trailer_keys`, `Claude-Session` by default). All case-insensitive
+  globs from the base ref's config; the Action reads the facts from the event
+  payload, a local run from `--pr-label`, `--pr-author`, `--pr-branch`,
+  `--event-file`.
+- Test-integrity check: deleted test files and tests, removed assertions,
+  added skip / xfail / `.only` markers, loosened and always-true assertions in
+  lines an agent wrote. Python and JS/TS in depth; table-driven. New `test_integrity`
+  score factor.
+- Policy gates as code in `.pr-verify.yaml`: `protected_paths`,
+  `agent_forbidden_paths` (with `@ci` and `@lockfiles` presets),
+  `max_changed_files`, `max_changed_lines`, `tests_must_change`. A violation
+  fails the check. New `policy` score factor.
+- description-vs-diff advisory: files and symbols the PR text mentions that
+  the diff does not touch (`--pr-title`, `--pr-body-file`). Advisory only.
+
 ## 0.1.5
 
 - Windows: a gate whose program is found on no trusted `PATH` entry now fails

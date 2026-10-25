@@ -1,6 +1,6 @@
 """Risk scoring: deterministic, documented, no LLM.
 
-Score 0-100 from six observable factors. The formula is public so teams
+Score 0-100 from eight observable factors. The formula is public so teams
 can argue with it and tune it — a black-box score is just another opinion.
 
   agent_share  40 pts  % of changed lines (added + removed) that an agent
@@ -21,6 +21,11 @@ can argue with it and tune it — a black-box score is just another opinion.
                       A pure-deletion PR previously capped at ~50 and could
                       never trip the high threshold; deleting auth.py is at
                       least as scary as rewriting it.
+
+  test_integrity 15 pts  any finding of the test-integrity check (testintegrity.py:
+                      an agent deleted, skipped, focused or loosened a test)
+  policy       10 pts  any violation of the policy rules in the config
+                      (policy.py), which also fails the verification
 
 Bands: 0-29 low · 30-69 medium · 70-100 high — labels only.
 
@@ -107,7 +112,9 @@ def score(prov: dict[str, prov_mod.FileProvenance],
           blast: dict[str, br_mod.BlastRadius],
           gate_results: list[gates_mod.GateResult],
           sensitive_paths: list[str],
-          threshold: int) -> RiskBreakdown:
+          threshold: int,
+          integrity_findings: int = 0,
+          policy_violations: int = 0) -> RiskBreakdown:
     factors: dict[str, dict] = {}
 
     total_added = sum(f.added for f in prov.values())
@@ -191,6 +198,15 @@ def score(prov: dict[str, prov_mod.FileProvenance],
         factors["deletion"] = {
             "points": 0,
             "detail": "no agent-attributed deletions"}
+
+    factors["test_integrity"] = {
+        "points": 15 if integrity_findings else 0,
+        "detail": (f"{integrity_findings} test-integrity finding(s)"
+                   if integrity_findings else "no test-integrity findings")}
+    factors["policy"] = {
+        "points": 10 if policy_violations else 0,
+        "detail": (f"{policy_violations} policy violation(s)"
+                   if policy_violations else "no policy violations")}
 
     total = min(100, sum(f["points"] for f in factors.values()))
     band = "low" if total < 30 else "medium" if total < 70 else "high"
