@@ -1,3 +1,4 @@
+include SECURITY.md
 # What setuptools leaves out of the sdist and the tests read: the CI workflow
 # and the action's two files (the tests parse action.yml and run run_action.py).
 # Every module under tests/ goes in -- fixture.py is imported by most of them --

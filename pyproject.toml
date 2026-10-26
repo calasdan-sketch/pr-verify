@@ -45,3 +45,6 @@ packages = ["pr_verify"]
 # `python -m unittest discover -s tests` does.
 pythonpath = ["tests"]
 testpaths = ["tests"]
+
+[tool.setuptools.package-data]
+pr_verify = ["py.typed"]

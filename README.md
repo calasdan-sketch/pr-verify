@@ -6,6 +6,8 @@ review; this tells a senior exactly how deep to review, from observable
 facts: which lines an agent wrote, what could break, and whether policy
 gates pass.
 
+**Limits:** It reports facts about a pull request (who wrote which lines, what depends on them, whether your gates pass); it does not read the code for bugs, and `agent` signals are only as good as the commit trailers and bot names it can see.
+
 ## Install
 
 Stdlib only, Python 3.10+, needs the `git` command line tool on PATH.
@@ -420,6 +422,28 @@ for a fail. The same holds for `--help`, `--version` and error messages (2
 stays 2), and on Windows, where such a pipe is not a `BrokenPipeError` but
 an `OSError` with errno 22 that shows up when the output is flushed.
 
+## Trust, size limits and trend
+
+**`pull_request_target` is not safe with gates.** Gates in `.pr-verify.yaml`
+(read from the base branch) run commands on the checked-out tree. If a
+workflow triggered by `pull_request_target` checks out the PR head, those
+commands execute PR-controlled code with the workflow's secrets and a write
+token. pr-verify prints a warning when `GITHUB_EVENT_NAME` is
+`pull_request_target`; use the `pull_request` event, or pass `--skip-gates`.
+
+**Gate output.** The PR comment names failed gates but does not include their
+output. `--format json` does include the last 2000 characters of each gate's
+output (`output_tail`); if you publish the JSON (artifacts, comments), add
+`--omit-gate-output`.
+
+**Big PRs.** Blame stops after `--max-blame-files` files (default 1000) or
+`--blame-budget` seconds (default 300); `0` means no limit. Files not blamed
+are listed under `unverified_files`, count as neither human nor agent, and the
+run exits 1 (unless the score gate is off with `--fail-on never`).
+
+**Trend.** `pr-verify trend old.json new.json` prints score and agent share
+for earlier `check --format json` reports, oldest first.
+
 ## Uncommitted changes and the snapshot
 
 With the default `--head HEAD`, `check` also verifies your uncommitted
@@ -687,7 +711,7 @@ compares, so the output below cannot drift from the code:
 
 ## Windows
 
-Works on Windows 11 / Python 3.11: git output is decoded as UTF-8 (paths
+Written for Windows (developed on Linux; what is proven is what this repo's CI matrix runs: Ubuntu, Windows and macOS on Python 3.10, 3.12 and 3.14): git output is decoded as UTF-8 (paths
 included), the report survives a cp1252 console (unencodable marks are
 replaced instead of crashing), gate commands are split with Windows rules
 and their executables resolved through `PATHEXT`, and the test suite uses

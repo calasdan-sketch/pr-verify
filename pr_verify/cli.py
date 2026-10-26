@@ -27,6 +27,7 @@ import os
 import subprocess
 import sys
 
+from . import __version__
 from . import blastradius as br_mod
 from . import config as config_mod
 from . import descdiff as descdiff_mod
@@ -39,7 +40,7 @@ from . import render as render_mod
 from . import risk as risk_mod
 from . import testintegrity as integrity_mod
 
-VERSION = "0.2.0"
+VERSION = __version__
 
 #: Tried in order when --base is not given (after origin/HEAD).
 BASE_CANDIDATES = ("main", "master", "origin/main", "origin/master")
@@ -650,10 +651,27 @@ def run_check(args) -> CheckResult:
                 f"this branch's own changes are scored")
     info = pr_info(args, root)
     signals = prinfo_mod.detect_signals(info, cfg)
+    if os.environ.get("GITHUB_EVENT_NAME") == "pull_request_target":
+        msg = ("running under pull_request_target: the gates in "
+               ".pr-verify.yaml run commands on the PR's checked-out code, "
+               "with this workflow's secrets and write token. Check out the "
+               "PR only with --skip-gates, or use the pull_request event")
+        notes.append(msg)
+        _eprint("warning: " + msg)
     prov = prov_mod.analyze(
         root, diff_base, head_sha, cfg["agent_markers"],
         pr_signal=prinfo_mod.signal_marker(signals[0]) if signals else None,
-        trailer_keys=markers_mod.parse_trailer_keys(cfg["agent_trailer_keys"]))
+        trailer_keys=markers_mod.parse_trailer_keys(cfg["agent_trailer_keys"]),
+        max_blame_files=getattr(args, "max_blame_files",
+                                prov_mod.DEFAULT_MAX_BLAME_FILES),
+        blame_budget=getattr(args, "blame_budget",
+                             prov_mod.DEFAULT_BLAME_BUDGET))
+    unverified = sorted(r for r, f in prov.items() if f.unverified)
+    if unverified:
+        notes.append(f"{len(unverified)} file(s) UNVERIFIED: the blame budget "
+                     f"(--max-blame-files / --blame-budget) ran out, so who "
+                     f"wrote their lines is unknown; they count as neither "
+                     f"human nor agent and the run requires review")
     findings: list = []
     violations: list = []
     advisories: list = []
@@ -704,7 +722,10 @@ def run_check(args) -> CheckResult:
             rel: {"direct": b.direct, "transitive": b.transitive,
                   "external_only": b.external_only, "scan": b.scan}
             for rel, b in blast.items()},
-        "gates": [g.as_dict() for g in gate_results],
+        "gates": [dict(g.as_dict(), output_tail="")
+                  if getattr(args, "omit_gate_output", False)
+                  else g.as_dict() for g in gate_results],
+        "unverified_files": unverified,
         "agent_signals": signals,
         "policy": {"violations": [v.as_dict() for v in violations]},
         "test_integrity": {"findings": [f.as_dict() for f in findings]},
@@ -718,6 +739,9 @@ def run_check(args) -> CheckResult:
         # --fail-on: the tool cannot vouch for this diff.
         code = 1
     elif breakdown.requires_review:
+        code = 1
+    elif unverified and min_score is not None:
+        # fail closed: a diff that could not be attributed is not vouched for
         code = 1
     else:
         code = 0
@@ -780,6 +804,21 @@ def write_extra_files(result: CheckResult, args) -> bool:
     return True
 
 
+def cmd_trend(args) -> int:
+    from . import trend as trend_mod
+    try:
+        t = trend_mod.build(args.reports)
+    except (OSError, ValueError) as e:
+        _eprint(f"error: {getattr(e, 'strerror', None) or e}")
+        return 2
+    if args.format == "json":
+        print(json.dumps(t, indent=2))    # exact: JSON escapes
+    else:
+        for line in trend_mod.to_text(t):
+            _out(line)
+    return 0
+
+
 def cmd_check(args) -> int:
     _ensure_repo(args.root)
     try:
@@ -792,6 +831,26 @@ def cmd_check(args) -> int:
     if not write_extra_files(result, args):
         return 2
     return result.code
+
+
+def _nonneg(value: str) -> int:
+    try:
+        n = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected an integer, got {value!r}")
+    if n < 0:
+        raise argparse.ArgumentTypeError("must be 0 or more")
+    return n
+
+
+def _nonneg_float(value: str) -> float:
+    try:
+        n = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a number, got {value!r}")
+    if not n >= 0:
+        raise argparse.ArgumentTypeError("must be 0 or more")
+    return n
 
 
 def _score_arg(value: str) -> int:
@@ -847,6 +906,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Overwrite a .pr-verify.yaml that is already there "
                         "(without it init leaves the file alone and exits "
                         "2).")
+
+    t = sub.add_parser("trend", help="Show score and agent share across "
+                                     "earlier `check --format json` reports.")
+    t.add_argument("reports", nargs="+", metavar="REPORT.json",
+                   help="Reports in the order to show (oldest first).")
+    t.add_argument("--format", choices=["human", "json"], default="human")
 
     c = sub.add_parser("check", help="Verify a diff range.")
     root_after(c)
@@ -907,6 +972,18 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Score at which the verification fails (score >= N "
                         "fails, N included). Overrides risk_threshold from "
                         ".pr-verify.yaml (default 70).")
+    c.add_argument("--max-blame-files", type=_nonneg, default=prov_mod.DEFAULT_MAX_BLAME_FILES,
+                   metavar="N",
+                   help="Blame at most N changed files (default 1000, 0 = no "
+                        "limit); the rest are reported as unverified.")
+    c.add_argument("--blame-budget", type=_nonneg_float,
+                   default=prov_mod.DEFAULT_BLAME_BUDGET, metavar="SECONDS",
+                   help="Stop blaming after SECONDS (default 300, 0 = no "
+                        "limit); the remaining files are reported as "
+                        "unverified and the run requires review.")
+    c.add_argument("--omit-gate-output", action="store_true",
+                   help="Leave the tail of each gate's output out of the "
+                        "report (it can hold secrets or file paths).")
     c.add_argument("--skip-gates", action="store_true",
                    help="Do not run the policy gates from .pr-verify.yaml.")
     return p
@@ -919,7 +996,8 @@ def main(argv=None) -> int:
         # write, so a closed pipe would only show at the flush on the way out.
         with _stdout_may_close():
             args = build_parser().parse_args(argv)
-        return {"init": cmd_init, "check": cmd_check}[args.cmd](args)
+        return {"init": cmd_init, "check": cmd_check,
+                "trend": cmd_trend}[args.cmd](args)
     except OSError as e:
         # What the commands did not take care of themselves: a file or a
         # stream the operating system refused (a full disk behind `> file`).

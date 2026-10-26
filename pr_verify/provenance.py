@@ -80,6 +80,7 @@ import dataclasses
 import os
 import re
 import subprocess
+import time
 import tempfile
 
 from . import markers as markers_mod
@@ -205,6 +206,9 @@ class FileProvenance:
     #: the added lines (numbers at head) credited to an agent: what the
     #: test-integrity check looks at, so it only reports an agent's lines
     agent_lines: list = dataclasses.field(default_factory=list)
+    #: blame was skipped (file cap or time budget): who wrote the added
+    #: lines is not known, so none of them is counted as human or agent
+    unverified: bool = False
 
     @property
     def changed(self) -> int:
@@ -658,10 +662,19 @@ def agent_label(name: str, marker: str) -> str:
     return f"{name} ({marker})"
 
 
+#: patchable clock for the blame time budget (tests never wait)
+_monotonic = time.monotonic
+#: defaults of the blame budget: files blamed and seconds spent
+DEFAULT_MAX_BLAME_FILES = 1000
+DEFAULT_BLAME_BUDGET = 300.0
+
+
 def analyze(root: str, base: str, head: str = "HEAD",
             agent_markers: list[str] | None = None,
             pr_signal: str | None = None,
-            trailer_keys: dict[str, str] | None = None
+            trailer_keys: dict[str, str] | None = None,
+            max_blame_files: int | None = DEFAULT_MAX_BLAME_FILES,
+            blame_budget: float | None = DEFAULT_BLAME_BUDGET
             ) -> dict[str, FileProvenance]:
     """Who wrote what between base and head.
 
@@ -682,7 +695,14 @@ def analyze(root: str, base: str, head: str = "HEAD",
     del_shas: dict[str, list[str]] = {}
     all_shas: set[str] = set()
     blame_options = _blame_options(root) if added or removed else []
-    for rel in added:
+    unverified: set[str] = set()
+    started = _monotonic()
+    for n, rel in enumerate(sorted(added)):
+        # A huge PR degrades to "unverified" instead of hanging the job.
+        if ((max_blame_files and n >= max_blame_files)
+                or (blame_budget and _monotonic() - started > blame_budget)):
+            unverified.add(rel)
+            continue
         try:
             bm = _blame_authors(root, head, rel, blame_options)
         except RuntimeError:
@@ -732,7 +752,10 @@ def analyze(root: str, base: str, head: str = "HEAD",
     for rel in sorted(set(added) | set(removed)):
         fp = FileProvenance(file=rel)
         bm = blame_maps.get(rel, {})
-        for ln in added.get(rel, []):
+        if rel in unverified:
+            fp.unverified = True
+            fp.added = len(added[rel])
+        for ln in ([] if rel in unverified else added.get(rel, [])):
             fp.added += 1
             sha = bm.get(ln)
             if sha in matched:

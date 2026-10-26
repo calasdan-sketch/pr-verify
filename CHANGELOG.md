@@ -2,10 +2,10 @@
 
 ## 0.2.0
 
-- Tests only: the comment-file path test builds the expected path with os.path.join (RUNNER_TEMP is a Windows path on a Windows runner).
-
-- Tests only: the Windows gate-lookup tests no longer depend on the runner's real `npx`, compare paths case- and short-name-insensitively, and the bash-run release-workflow steps are skipped on Windows.
-
+- Large PRs degrade instead of hanging: `--max-blame-files` (default 1000) and `--blame-budget` (default 300 s) cap blame; files left over are listed as `unverified_files`, count as neither human nor agent, and the run requires review (exit 1 unless the score gate is off).
+- Under `GITHUB_EVENT_NAME=pull_request_target` a warning is printed and added to the report notes (gates run the PR's code); documented in the README.
+- `--omit-gate-output` blanks the gate output tails in the JSON report.
+- `pr-verify trend REPORT.json ...` shows score and agent share across earlier JSON reports; the PR comment gets a text "Agent share" badge.
 - `--format sarif` prints a SARIF 2.1.0 log and `--format comment` the markdown
   of a sticky pull request comment whose headline is `Review depth:
   skim|normal|deep`, a pure function of the facts in the JSON. `--sarif-file`
@@ -34,6 +34,8 @@
   fails the check. New `policy` score factor.
 - description-vs-diff advisory: files and symbols the PR text mentions that
   the diff does not touch (`--pr-title`, `--pr-body-file`). Advisory only.
+- Tests only: the comment-file path test builds the expected path with os.path.join (RUNNER_TEMP is a Windows path on a Windows runner).
+- Tests only: the Windows gate-lookup tests no longer depend on the runner's real `npx`, compare paths case- and short-name-insensitively, and the bash-run release-workflow steps are skipped on Windows.
 
 ## 0.1.5
 

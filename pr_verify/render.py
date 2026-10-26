@@ -231,6 +231,23 @@ def _more(items, shown=MAX_LISTED):
     return max(0, len(items) - shown)
 
 
+def agent_share_pct(files: dict) -> int:
+    """Percent of changed lines (added + removed) an agent wrote."""
+    total = sum(v.get("added", 0) + v.get("removed", 0)
+                for v in files.values())
+    agent = sum(v.get("agent_added", 0) + v.get("agent_removed", 0)
+                for v in files.values())
+    return round(100 * agent / total) if total else 0
+
+
+def share_badge(files: dict) -> str:
+    """Plain-text badge: `Agent share: 40% [####------]` (no image, no
+    external service)."""
+    pct = agent_share_pct(files)
+    filled = round(pct / 10)
+    return f"Agent share: {pct}% [{'#' * filled}{'-' * (10 - filled)}]"
+
+
 def to_comment(payload: dict) -> str:
     """The sticky pull request comment, markdown. The first line is the
     marker the Action finds it by, the headline is
@@ -251,6 +268,11 @@ def to_comment(payload: dict) -> str:
     agent_added = sum(v.get("agent_added", 0) for v in files.values())
     out.append(f"{agent_added} of {added} added lines written by an agent "
                f"across {len(files)} changed file(s).")
+    out.append(share_badge(files))
+    unv = payload.get("unverified_files") or []
+    if unv:
+        out.append(f"**{len(unv)} file(s) unverified**: the blame budget ran "
+                   f"out, so who wrote them is unknown.")
     out.append("")
 
     signals = payload.get("agent_signals") or []
