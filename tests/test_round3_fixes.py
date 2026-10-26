@@ -449,12 +449,16 @@ class TestWindowsGates(unittest.TestCase):
             seen.append(name)
             return r"C:\Users\dan\AppData\Roaming\npm\npx.cmd" if name == "npx" else None
 
-        with mock.patch.object(gates_mod.shutil, "which", fake_which):
+        # outside Windows, shutil.which decides (on Windows the trusted-PATH search
+        # is used instead, which is tested on its own)
+        with mock.patch.object(gates_mod, "_on_windows", lambda: False), \
+                mock.patch.object(gates_mod.shutil, "which", fake_which):
             argv = gates_mod.resolve_executable(["npx", "tsc", "--noEmit"])
         self.assertEqual(argv, [r"C:\Users\dan\AppData\Roaming\npm\npx.cmd",
                                 "tsc", "--noEmit"])
         self.assertEqual(seen, ["npx"])
-        with mock.patch.object(gates_mod.shutil, "which", lambda n: None):
+        with mock.patch.object(gates_mod, "_on_windows", lambda: False), \
+                mock.patch.object(gates_mod.shutil, "which", lambda n: None):
             self.assertEqual(gates_mod.resolve_executable(["nope", "x"]),
                              ["nope", "x"])
 
@@ -472,7 +476,8 @@ class TestWindowsGates(unittest.TestCase):
         self.assertEqual([r.passed for r in res], [True, False])
         self.assertEqual(res[1].returncode, 3)
         self.assertEqual(res[1].command, f"{PY} -c raise SystemExit(3)")
-        self.assertEqual(calls, [PY, PY])
+        if os.name != "nt":     # on Windows the trusted-PATH search is used, not shutil.which
+            self.assertEqual(calls, [PY, PY])
 
     def test_list_gate_from_yaml_config(self):
         tmp, old_base = make_pr_repo()

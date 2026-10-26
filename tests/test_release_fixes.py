@@ -118,9 +118,15 @@ class TestWindowsProgramLookup(unittest.TestCase):
         self.win.start()
         self.addCleanup(self.win.stop)
 
+    def assertSamePath(self, got, want):
+        # Windows: short 8.3 names, drive-letter and extension case are not differences
+        norm = lambda p: os.path.normcase(os.path.realpath(p))
+        self.assertEqual(norm(got), norm(want))
+
     def test_the_checkout_is_not_searched_even_when_it_is_on_path(self):
         argv = gates_mod.resolve_executable(["mytool", "x"], self.checkout)
-        self.assertEqual(argv, [os.path.join(self.tools, "mytool.cmd"), "x"])
+        self.assertEqual(argv[1:], ["x"])
+        self.assertSamePath(argv[0], os.path.join(self.tools, "mytool.cmd"))
 
     def test_the_working_directory_is_not_searched(self):
         cwd = os.getcwd()
@@ -129,7 +135,8 @@ class TestWindowsProgramLookup(unittest.TestCase):
             argv = gates_mod.resolve_executable(["mytool"], None)
         finally:
             os.chdir(cwd)
-        self.assertEqual(argv, [os.path.join(self.tools, "mytool.cmd")])
+        self.assertEqual(len(argv), 1)
+        self.assertSamePath(argv[0], os.path.join(self.tools, "mytool.cmd"))
 
     def test_a_name_that_is_nowhere_but_in_the_checkout_is_not_found(self):
         # was: returned the bare name, which CreateProcess searches for in
@@ -157,14 +164,11 @@ class TestWindowsProgramLookup(unittest.TestCase):
         self.assertTrue(res[0].passed)
 
     def test_other_platforms_still_use_shutil_which(self):
-        self.win.stop()
-        try:
-            with mock.patch.object(gates_mod.shutil, "which",
-                                   lambda n: "/usr/bin/" + n):
-                self.assertEqual(gates_mod.resolve_executable(["git", "x"]),
-                                 ["/usr/bin/git", "x"])
-        finally:
-            self.win.start()
+        with mock.patch.object(gates_mod, "_on_windows", lambda: False), \
+                mock.patch.object(gates_mod.shutil, "which",
+                                  lambda n: "/usr/bin/" + n):
+            self.assertEqual(gates_mod.resolve_executable(["git", "x"]),
+                             ["/usr/bin/git", "x"])
 
     def test_the_readme_says_so(self):
         readme = " ".join(_read("README.md").split())
