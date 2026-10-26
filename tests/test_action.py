@@ -122,7 +122,8 @@ class TestBuildArgv(unittest.TestCase):
     def test_empty_env_gives_cli_defaults(self):
         # the step summary is on by default, so the comment file is written
         self.assertEqual(action_mod.build_argv({"RUNNER_TEMP": "/rt"}),
-                         ["check", "--comment-file", "/rt/pr-verify-comment.md"])
+                         ["check", "--comment-file",
+                          os.path.join("/rt", "pr-verify-comment.md")])
         self.assertEqual(action_mod.build_argv(
             {"RUNNER_TEMP": "/rt", "PR_VERIFY_STEP_SUMMARY": "false"}),
             ["check"])

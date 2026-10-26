@@ -2,6 +2,8 @@
 
 ## 0.2.0
 
+- Tests only: the comment-file path test builds the expected path with os.path.join (RUNNER_TEMP is a Windows path on a Windows runner).
+
 - Tests only: the Windows gate-lookup tests no longer depend on the runner's real `npx`, compare paths case- and short-name-insensitively, and the bash-run release-workflow steps are skipped on Windows.
 
 - `--format sarif` prints a SARIF 2.1.0 log and `--format comment` the markdown
