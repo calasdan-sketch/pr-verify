@@ -101,10 +101,12 @@ class TestPullRequestTarget(unittest.TestCase):
 class TestGateOutput(unittest.TestCase):
     def _gated(self):
         tmp, base = repo(1)
-        cfg = ("gates:\n  - " + yaml_str(gate(
-            PY, "-c", "print('sekrit-output'); raise SystemExit(1)")) + "\n")
+        # a script file, so no quoting of code survives a Windows shell
+        cfg = ("gates:\n  - " + yaml_str(gate(PY, "noisy_gate.py")) + "\n")
         commit_as(tmp, "Dan Calas", "dan@example.com", "cfg",
-                  {".pr-verify.yaml": cfg})
+                  {".pr-verify.yaml": cfg,
+                   "noisy_gate.py": "import sys\nprint('sekrit-output')\n"
+                                    "sys.exit(1)\n"})
         base = subprocess.run(["git", "-C", tmp, "rev-parse", "HEAD"],
                               capture_output=True, text=True, check=True
                               ).stdout.strip()
