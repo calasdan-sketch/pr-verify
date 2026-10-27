@@ -10,7 +10,7 @@ inputs:
     required: false
     default: HEAD
   format:
-    description: Report format, human or json (same as --format).
+    description: Report format, human, json, sarif or comment (same as --format).
     required: false
     default: human
   fail-on:
@@ -29,6 +29,22 @@ inputs:
     description: Path inside the repository (same as --root); the repository's top level is verified. Empty means the working directory.
     required: false
     default: ""
+  sarif-file:
+    description: Also write the SARIF 2.1.0 log to this path (same as --sarif-file); upload it with github/codeql-action/upload-sarif (that step needs security-events write). Empty means no file.
+    required: false
+    default: ""
+  comment:
+    description: Set to true to post the result as ONE sticky pull request comment, updated on every push (headline Review depth skim, normal or deep). Needs the permission pull-requests write for the token; a token that cannot post (pull requests from forks) gives a warning, never a failed check.
+    required: false
+    default: "false"
+  github-token:
+    description: The token the comment is posted with. The default is the workflow's own token; it must have pull-requests write.
+    required: false
+    default: ${{ github.token }}
+  step-summary:
+    description: Set to false to leave the job summary alone; by default the same markdown as the comment is added to it.
+    required: false
+    default: "true"
 outputs:
   score:
     description: Risk score 0-100.
@@ -55,6 +71,10 @@ runs:
         PR_VERIFY_MIN_SCORE: ${{ inputs.min-score }}
         PR_VERIFY_SKIP_GATES: ${{ inputs.skip-gates }}
         PR_VERIFY_ROOT: ${{ inputs.root }}
+        PR_VERIFY_SARIF_FILE: ${{ inputs.sarif-file }}
+        PR_VERIFY_COMMENT: ${{ inputs.comment }}
+        PR_VERIFY_GITHUB_TOKEN: ${{ inputs.github-token }}
+        PR_VERIFY_STEP_SUMMARY: ${{ inputs.step-summary }}
       # -I: the checkout (the working directory) is data, never imported from;
       # see run_action.py. Nothing to install: pr-verify has no dependencies.
       run: python -I "$GITHUB_ACTION_PATH/run_action.py"

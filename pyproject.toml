@@ -4,12 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pr-verify"
-version = "0.1.3"
+version = "0.2.0"
 description = "Deterministic trust scoring for agent-authored PRs."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
+authors = [{name = "Calas Automations Inc."}]
 keywords = [
     "pull-request", "code-review", "ai-agents", "provenance",
     "blast-radius", "risk-score", "git", "ci",
@@ -24,11 +25,13 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Quality Assurance",
 ]
 
 [project.urls]
 Homepage = "https://github.com/calasdan-sketch/pr-verify"
+Repository = "https://github.com/calasdan-sketch/pr-verify"
 Issues = "https://github.com/calasdan-sketch/pr-verify/issues"
 
 [project.scripts]
@@ -42,3 +45,6 @@ packages = ["pr_verify"]
 # `python -m unittest discover -s tests` does.
 pythonpath = ["tests"]
 testpaths = ["tests"]
+
+[tool.setuptools.package-data]
+pr_verify = ["py.typed"]

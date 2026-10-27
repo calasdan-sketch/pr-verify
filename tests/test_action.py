@@ -63,7 +63,8 @@ class TestActionYml(unittest.TestCase):
     def test_every_input_maps_to_a_real_cli_flag(self):
         flags = _check_parser_defaults()
         inputs = self.action["inputs"]
-        self.assertEqual(set(inputs), set(action_mod.INPUTS),
+        self.assertEqual(set(inputs),
+                         set(action_mod.INPUTS) | set(action_mod.ACTION_ONLY),
                          "action.yml inputs and action.INPUTS disagree")
         for name, (env_var, flag, kind) in action_mod.INPUTS.items():
             self.assertIn(flag, flags, f"input {name!r} -> unknown flag {flag}")
@@ -94,7 +95,10 @@ class TestActionYml(unittest.TestCase):
         for name, (env_var, flag, kind) in action_mod.INPUTS.items():
             self.assertEqual(env.get(env_var), "${{ inputs." + name + " }}",
                              env_var)
-        self.assertEqual(set(env), {v[0] for v in action_mod.INPUTS.values()})
+        for name, var in action_mod.ACTION_ONLY.items():
+            self.assertEqual(env.get(var), "${{ inputs." + name + " }}", var)
+        self.assertEqual(set(env), {v[0] for v in action_mod.INPUTS.values()}
+                         | set(action_mod.ACTION_ONLY.values()))
 
     def test_outputs_declared(self):
         outputs = self.action["outputs"]
@@ -110,19 +114,25 @@ class TestActionYml(unittest.TestCase):
         self.assertIn("action.yml", readme)
         self.assertNotIn(".github/workflows/pr-verify.yml", readme,
                          "README must not point at a file that does not exist")
-        for name in action_mod.INPUTS:
+        for name in (*action_mod.INPUTS, *action_mod.ACTION_ONLY):
             self.assertIn(name, readme)
 
 
 class TestBuildArgv(unittest.TestCase):
     def test_empty_env_gives_cli_defaults(self):
-        self.assertEqual(action_mod.build_argv({}), ["check"])
+        # the step summary is on by default, so the comment file is written
+        self.assertEqual(action_mod.build_argv({"RUNNER_TEMP": "/rt"}),
+                         ["check", "--comment-file",
+                          os.path.join("/rt", "pr-verify-comment.md")])
+        self.assertEqual(action_mod.build_argv(
+            {"RUNNER_TEMP": "/rt", "PR_VERIFY_STEP_SUMMARY": "false"}),
+            ["check"])
 
     def test_values_and_flags(self):
         env = {"PR_VERIFY_BASE": "origin/main", "PR_VERIFY_HEAD": " HEAD ",
                "PR_VERIFY_FORMAT": "json", "PR_VERIFY_FAIL_ON": "never",
                "PR_VERIFY_MIN_SCORE": "55", "PR_VERIFY_SKIP_GATES": "true",
-               "PR_VERIFY_ROOT": "/repo"}
+               "PR_VERIFY_ROOT": "/repo", "PR_VERIFY_STEP_SUMMARY": "false"}
         self.assertEqual(action_mod.build_argv(env), [
             "--root", "/repo", "check", "--base", "origin/main", "--head", "HEAD",
             "--format", "json", "--fail-on", "never", "--min-score", "55",

@@ -80,6 +80,7 @@ import dataclasses
 import os
 import re
 import subprocess
+import time
 import tempfile
 
 from . import markers as markers_mod
@@ -202,6 +203,12 @@ class FileProvenance:
     #: `deleted`, not this), and how many of those an agent's commit removed
     removed: int = 0
     agent_removed: int = 0
+    #: the added lines (numbers at head) credited to an agent: what the
+    #: test-integrity check looks at, so it only reports an agent's lines
+    agent_lines: list = dataclasses.field(default_factory=list)
+    #: blame was skipped (file cap or time budget): who wrote the added
+    #: lines is not known, so none of them is counted as human or agent
+    unverified: bool = False
 
     @property
     def changed(self) -> int:
@@ -655,8 +662,27 @@ def agent_label(name: str, marker: str) -> str:
     return f"{name} ({marker})"
 
 
+#: patchable clock for the blame time budget (tests never wait)
+_monotonic = time.monotonic
+#: defaults of the blame budget: files blamed and seconds spent
+DEFAULT_MAX_BLAME_FILES = 1000
+DEFAULT_BLAME_BUDGET = 300.0
+
+
 def analyze(root: str, base: str, head: str = "HEAD",
-            agent_markers: list[str] | None = None) -> dict[str, FileProvenance]:
+            agent_markers: list[str] | None = None,
+            pr_signal: str | None = None,
+            trailer_keys: dict[str, str] | None = None,
+            max_blame_files: int | None = DEFAULT_MAX_BLAME_FILES,
+            blame_budget: float | None = DEFAULT_BLAME_BUDGET
+            ) -> dict[str, FileProvenance]:
+    """Who wrote what between base and head.
+
+    `pr_signal` is the label of an agent signal from the pull request itself
+    (prinfo.signal_marker: `branch:claude/fix`): when given, every commit of
+    the range counts as an agent's, credited to that signal unless a marker
+    matched the commit already. `trailer_keys` are the trailer keys that name
+    an agent by themselves (markers.parse_trailer_keys)."""
     agent_markers = [str(m).lower() for m in (agent_markers or [])]
     added, removed = _scan_patch(_patch(root, base, head))
     added = {rel: lines for rel, lines in added.items() if rel != CONFIG_FILE}
@@ -669,7 +695,14 @@ def analyze(root: str, base: str, head: str = "HEAD",
     del_shas: dict[str, list[str]] = {}
     all_shas: set[str] = set()
     blame_options = _blame_options(root) if added or removed else []
-    for rel in added:
+    unverified: set[str] = set()
+    started = _monotonic()
+    for n, rel in enumerate(sorted(added)):
+        # A huge PR degrades to "unverified" instead of hanging the job.
+        if ((max_blame_files and n >= max_blame_files)
+                or (blame_budget and _monotonic() - started > blame_budget)):
+            unverified.add(rel)
+            continue
         try:
             bm = _blame_authors(root, head, rel, blame_options)
         except RuntimeError:
@@ -689,9 +722,12 @@ def analyze(root: str, base: str, head: str = "HEAD",
     texts = _commit_text(root, all_shas)
     matched: dict[str, str] = {}   # sha -> marker that identified it
     for sha, (name, email, subject, body) in texts.items():
-        hit = markers_mod.match(name, email, subject, body, agent_markers)
+        hit = markers_mod.match(name, email, subject, body, agent_markers,
+                                trailer_keys)
         if hit:
             matched[sha] = hit
+        elif pr_signal:
+            matched[sha] = pr_signal
     # file -> {agent commit: base lines it removed from the file}
     agent_removals: dict[str, dict[str, int]] = {}
     agent_removers = [(sha, parent) for sha, parent in removers
@@ -716,11 +752,15 @@ def analyze(root: str, base: str, head: str = "HEAD",
     for rel in sorted(set(added) | set(removed)):
         fp = FileProvenance(file=rel)
         bm = blame_maps.get(rel, {})
-        for ln in added.get(rel, []):
+        if rel in unverified:
+            fp.unverified = True
+            fp.added = len(added[rel])
+        for ln in ([] if rel in unverified else added.get(rel, [])):
             fp.added += 1
             sha = bm.get(ln)
             if sha in matched:
                 fp.agent_added += 1
+                fp.agent_lines.append(ln)
                 fp.agents.add(agent_label(who(sha), matched[sha]))
             else:
                 fp.human_added += 1

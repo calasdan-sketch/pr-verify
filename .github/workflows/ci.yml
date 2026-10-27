@@ -1,7 +1,8 @@
-# Test suite for pr-verify itself: install the package, run the tests, on
-# every supported Python. Stdlib only, so there is nothing else to install;
-# the tests build throwaway git repositories (git is on every runner) and
-# never touch the network.
+# Test suite for pr-verify itself: install the package, run the tests, on every
+# supported system and on the oldest, a middle and the newest Python. Stdlib
+# only, so there is nothing else to install; the tests build throwaway git repositories (git is on every runner) and never touch the network.
+# A second job builds the distribution, checks its metadata and installs the
+# wheel the way a user would.
 name: ci
 
 on:
@@ -20,13 +21,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        python: ["3.11", "3.12", "3.13"]
-        include:
-          # requires-python is >=3.10: check that floor once, on the
-          # cheapest runner, instead of on all three systems. (The oldest
-          # Python is where argparse still lets a closed pipe through.)
-          - os: ubuntu-latest
-            python: "3.10"
+        python: ["3.10", "3.12", "3.14"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -38,3 +33,34 @@ jobs:
         run: python -m unittest discover -s tests
       - name: Smoke-test the console script
         run: pr-verify --version
+
+  package:
+    name: build, twine check, install the wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        run: |
+          python -m pip install build twine
+          python -m build
+      - name: Check the metadata
+        run: twine check --strict dist/*
+      - name: Install the wheel in a clean environment and run it
+        run: |
+          python -m venv "$RUNNER_TEMP/wheel-venv"
+          "$RUNNER_TEMP/wheel-venv/bin/pip" install dist/*.whl
+          "$RUNNER_TEMP/wheel-venv/bin/pr-verify" --version
+      # What PyPI users get as the source distribution must carry and pass its
+      # own tests: unpack it, install it in a clean venv, run the suite.
+      - name: Run the tests from the sdist
+        run: |
+          set -e
+          mkdir "$RUNNER_TEMP/sdist"
+          tar -xzf dist/*.tar.gz -C "$RUNNER_TEMP/sdist" --strip-components=1
+          python -m venv "$RUNNER_TEMP/sdist-venv"
+          "$RUNNER_TEMP/sdist-venv/bin/python" -m pip install dist/*.tar.gz
+          cd "$RUNNER_TEMP/sdist"
+          "$RUNNER_TEMP/sdist-venv/bin/python" -m unittest discover -s tests

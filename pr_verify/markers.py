@@ -60,6 +60,19 @@ _FOOTER_RE = re.compile(r"^[^\w\[]*Generated with \[([^\]]+)\]", re.IGNORECASE)
 _AGENT_KEYS = {"claude-session": "Claude"}
 
 
+def parse_trailer_keys(entries) -> dict[str, str]:
+    """Config `agent_trailer_keys` -> {key: name}. Each entry is
+    `key: Name` (`claude-session: Claude`); an entry without a name stands
+    for the key itself. Keys are compared without case."""
+    keys: dict[str, str] = {}
+    for entry in entries:
+        key, sep, name = str(entry).partition(":")
+        key, name = key.strip().lower(), name.strip()
+        if key:
+            keys[key] = name or key
+    return keys
+
+
 def _words(text: str) -> list[str]:
     return [w.lower() for w in _WORD_RE.findall(text or "")]
 
@@ -123,8 +136,10 @@ def email_matches(email: str, marker: str) -> bool:
     return False
 
 
-def _trailers(body: str) -> list[tuple[str, str]]:
+def _trailers(body: str, agent_keys: dict[str, str] | None = None
+              ) -> list[tuple[str, str]]:
     """(name, email) pairs from trailer lines in the body."""
+    agent_keys = _AGENT_KEYS if agent_keys is None else agent_keys
     out: list[tuple[str, str]] = []
     # lines end at "\n", as in git: str.splitlines() would also cut at
     # \x0b \x1e \u2028 ..., so `Co-Authored-By:\x1e Claude <x>` lost its value
@@ -134,8 +149,8 @@ def _trailers(body: str) -> list[tuple[str, str]]:
             out.append((footer.group(1).strip(), ""))
             continue
         m = _TRAILER_RE.match(line)
-        if m and m.group(1).lower() in _AGENT_KEYS:
-            out.append((_AGENT_KEYS[m.group(1).lower()], ""))
+        if m and m.group(1).lower() in agent_keys:
+            out.append((agent_keys[m.group(1).lower()], ""))
             continue
         if not m or m.group(1).lower() not in TRAILER_KEYS:
             continue
@@ -149,10 +164,13 @@ def _trailers(body: str) -> list[tuple[str, str]]:
 
 
 def match(name: str, email: str, subject: str, body: str,
-          markers: list[str]) -> str | None:
+          markers: list[str],
+          agent_keys: dict[str, str] | None = None) -> str | None:
     """The first marker that identifies this commit as agent-authored,
-    or None. Markers are matched in the order given."""
-    trailers = _trailers(body)
+    or None. Markers are matched in the order given. `agent_keys` are the
+    trailer keys that name an agent by themselves (parse_trailer_keys of the
+    config's agent_trailer_keys; default: Claude-Session)."""
+    trailers = _trailers(body, agent_keys)
     subject_prefix = ""
     if subject and ":" in subject:
         subject_prefix = subject.split(":", 1)[0].strip().lower()

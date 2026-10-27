@@ -59,6 +59,31 @@ DEFAULTS = {
     # executables with arguments — no pipes, redirects, or $VARs.
     "gates": [],
     # "gates": ["python -m pytest -x -q"],
+    # Agent signals from the pull request itself (prinfo.py), not from its
+    # commits. Case-insensitive globs (`*` also matches `/`) against the whole
+    # value: a PR label, the PR author's account, the head branch. A match
+    # scores the pull request's lines as agent-written.
+    "agent_labels": [
+        "ai-generated", "ai-assisted", "agent-authored", "agent", "claude",
+        "claude-code", "copilot", "codex", "cursor",
+    ],
+    "agent_authors": [
+        "copilot", "copilot-swe-agent", "copilot-swe-agent[bot]",
+        "claude", "claude[bot]", "claude-code[bot]", "cursoragent",
+        "cursor[bot]", "codex[bot]", "chatgpt-codex-connector[bot]",
+        "devin-ai-integration[bot]",
+    ],
+    "agent_branches": ["claude/*", "copilot/*", "cursor/*", "codex/*"],
+    # Commit trailers that name an agent by their KEY alone, whatever the
+    # value: `key: Name`. Claude Code's `Claude-Session: <url>` is one.
+    "agent_trailer_keys": ["claude-session: Claude"],
+    # Policy gates as code (policy.py). All off until set. `@ci` and
+    # `@lockfiles` stand for the usual CI configuration and lock files.
+    "protected_paths": [],
+    "agent_forbidden_paths": [],
+    "max_changed_files": 0,     # 0 = no budget
+    "max_changed_lines": 0,     # added + removed lines; 0 = no budget
+    "tests_must_change": False,
     "risk_threshold": 70,   # score >= this fails (see risk.gate); --min-score overrides
     "timeout": 300,         # seconds per gate
 }
@@ -107,8 +132,12 @@ def _read_base_config(root: str, base: str) -> dict:
     return data
 
 
-_INT_FIELDS = {"risk_threshold": (0, 100), "timeout": (1, None)}
-_LIST_FIELDS = ("agent_markers", "sensitive_paths", "gates")
+_INT_FIELDS = {"risk_threshold": (0, 100), "timeout": (1, None),
+               "max_changed_files": (0, None), "max_changed_lines": (0, None)}
+_LIST_FIELDS = ("agent_markers", "sensitive_paths", "gates", "agent_labels",
+                "agent_authors", "agent_branches", "agent_trailer_keys",
+                "protected_paths", "agent_forbidden_paths")
+_BOOL_FIELDS = ("tests_must_change",)
 
 
 def _as_gate(g) -> str | list[str]:
@@ -139,6 +168,14 @@ def _as_int(key: str, val, lo: int | None, hi: int | None) -> int:
     return num
 
 
+def _as_bool(key: str, val) -> bool:
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str) and val.strip().lower() in ("true", "false"):
+        return val.strip().lower() == "true"
+    raise ValueError(f"{CONFIG_FILE}: {key} must be true or false, got {val!r}")
+
+
 def _unknown_setting(key, base: str) -> str:
     """The warning for a key that is not a setting, with the setting it
     looks like when there is one (`gate` -> `gates`, `risk_treshold` ->
@@ -164,6 +201,8 @@ def load(root: str, base: str, warn=None) -> dict:
             warn(_unknown_setting(key, base))
     for key, (lo, hi) in _INT_FIELDS.items():
         cfg[key] = _as_int(key, cfg[key], lo, hi)
+    for key in _BOOL_FIELDS:
+        cfg[key] = _as_bool(key, cfg[key])
     for key in _LIST_FIELDS:
         val = cfg.get(key)
         if val is None:
@@ -176,6 +215,10 @@ def load(root: str, base: str, warn=None) -> dict:
     cfg["agent_markers"] = [str(m).lower() for m in cfg["agent_markers"]]
     cfg["sensitive_paths"] = [str(x) for x in cfg["sensitive_paths"]]
     cfg["gates"] = [_as_gate(g) for g in cfg["gates"]]
+    for key in ("agent_labels", "agent_authors", "agent_branches",
+                "agent_trailer_keys", "protected_paths",
+                "agent_forbidden_paths"):
+        cfg[key] = [str(x) for x in cfg[key]]
     return cfg
 
 
@@ -213,6 +256,26 @@ def example_config() -> str:
         "#   gates:",
         '#     - "python -m pytest -x -q"',
         *_yaml_list("gates", DEFAULTS["gates"]),
+        "",
+        "# Agent signals from the pull request itself, not its commits: PR",
+        "# labels, the PR author's account, the head branch (case-insensitive",
+        "# globs against the whole value). A match scores the PR as agent-written.",
+        *_yaml_list("agent_labels", DEFAULTS["agent_labels"]),
+        *_yaml_list("agent_authors", DEFAULTS["agent_authors"]),
+        *_yaml_list("agent_branches", DEFAULTS["agent_branches"]),
+        "# Commit trailers that name an agent by their key alone (key: Name).",
+        *_yaml_list("agent_trailer_keys", DEFAULTS["agent_trailer_keys"]),
+        "",
+        "# Policy gates as code; a violation fails the check. All off by default.",
+        "# protected_paths: nobody's change to these passes. agent_forbidden_paths:",
+        "# an agent's change to these does not (@ci and @lockfiles are presets).",
+        "# max_changed_files / max_changed_lines: a change budget (0 = none).",
+        "# tests_must_change: source changed with no test file changed fails.",
+        *_yaml_list("protected_paths", DEFAULTS["protected_paths"]),
+        *_yaml_list("agent_forbidden_paths", DEFAULTS["agent_forbidden_paths"]),
+        f"max_changed_files: {DEFAULTS['max_changed_files']}",
+        f"max_changed_lines: {DEFAULTS['max_changed_lines']}",
+        f"tests_must_change: {str(DEFAULTS['tests_must_change']).lower()}",
         "",
         "# The score at which the check fails (score >= this; --min-score",
         "# overrides), and the seconds each gate may take.",

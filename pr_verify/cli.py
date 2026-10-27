@@ -27,13 +27,20 @@ import os
 import subprocess
 import sys
 
+from . import __version__
 from . import blastradius as br_mod
 from . import config as config_mod
+from . import descdiff as descdiff_mod
 from . import gates as gates_mod
+from . import markers as markers_mod
+from . import policy as policy_mod
+from . import prinfo as prinfo_mod
 from . import provenance as prov_mod
+from . import render as render_mod
 from . import risk as risk_mod
+from . import testintegrity as integrity_mod
 
-VERSION = "0.1.3"
+VERSION = __version__
 
 #: Tried in order when --base is not given (after origin/HEAD).
 BASE_CANDIDATES = ("main", "master", "origin/main", "origin/master")
@@ -387,6 +394,13 @@ def _report_human(result: "CheckResult") -> None:
     for note in result.notes:
         _out(f"  note: {note}")
     _out()
+    _out(f"  Review depth: {result.depth['depth']}")
+    for why in result.depth["reasons"]:
+        _out(f"    {why}")
+    for sig in result.signals:
+        _out(f"  agent signal: {sig['kind']} {sig['value']} "
+             f"(matched {sig['rule']})")
+    _out()
     _out(f"  provenance: {agent_added}/{total_added} added lines "
          f"agent-authored"
          + (f"; {agent_removed}/{total_removed} removed lines agent-authored"
@@ -422,9 +436,25 @@ def _report_human(result: "CheckResult") -> None:
         mark = "PASS" if g.passed else ("TIMEOUT" if g.timed_out else "FAIL")
         _out(f"    [{mark}] {g.command}")
     _out()
+    if result.violations:
+        _out("  policy violations:")
+        for v in result.violations:
+            _out(f"    [{v.rule}] {v.message}")
+        _out()
+    if result.findings:
+        _out("  test integrity:")
+        for f in result.findings:
+            where = f"{f.file}:{f.line}" if f.line else f.file
+            _out(f"    [{f.rule}] {where}  {f.message}")
+        _out()
+    if result.advisories:
+        _out("  description vs diff (advisory, not scored):")
+        for a in result.advisories:
+            _out(f"    {a['message']}")
+        _out()
     _out("  risk factors:")
     for name, fac in breakdown.factors.items():
-        _out(f"    {fac['points']:>3} pts  {name:12} {fac['detail']}")
+        _out(f"    {fac['points']:>3} pts  {name:14} {fac['detail']}")
     _out()
     failed = [g.command for g in gate_results if not g.passed]
     if failed:
@@ -460,6 +490,11 @@ class CheckResult:
     base_detected: bool = False
     notes: list = dataclasses.field(default_factory=list)
     nothing: bool = False     # no added/deleted lines in the range
+    signals: list = dataclasses.field(default_factory=list)
+    violations: list = dataclasses.field(default_factory=list)
+    findings: list = dataclasses.field(default_factory=list)
+    advisories: list = dataclasses.field(default_factory=list)
+    depth: dict = dataclasses.field(default_factory=dict)
 
     def nothing_lines(self) -> list[str]:
         """What the human report says when there is nothing to verify: one
@@ -467,6 +502,15 @@ class CheckResult:
         lines = [f"no added lines in {self.payload['base']}.."
                  f"{self.payload['head']} — nothing to verify"]
         return lines + [f"note: {note}" for note in self.notes]
+
+
+def _file_at(root: str, rev: str, rel: str, limit: int = 1_000_000) -> str:
+    """A file as it is at `rev`, cut at `limit` bytes ("" when git has none)."""
+    try:
+        return prov_mod._git_bytes(root, "show", f"{rev}:{rel}")[:limit].decode(
+            "utf-8", "replace")
+    except (RuntimeError, OSError, subprocess.SubprocessError):
+        return ""
 
 
 def _config_note(root: str, base: str) -> str | None:
@@ -489,6 +533,43 @@ def _config_note(root: str, base: str) -> str | None:
                 f"{base}: the {base} version is in effect — commit it to "
                 f"{base}")
     return None
+
+
+def _current_branch(root: str) -> str:
+    """The checked-out branch, or "" (detached HEAD, or git cannot say)."""
+    try:
+        p = subprocess.run(["git", "-C", root, "symbolic-ref", "--short",
+                            "-q", "HEAD"], capture_output=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return os.fsdecode(p.stdout).strip() if p.returncode == 0 else ""
+
+
+def _read_text_file(path: str, limit: int) -> str:
+    with open(path, "rb") as f:
+        return f.read(limit).decode("utf-8", "replace")
+
+
+def pr_info(args, root: str) -> "prinfo_mod.PRInfo":
+    """What the pull request says about itself: the event file first, then
+    the flags (see prinfo.py). With no branch named anywhere, a check of the
+    working tree (--head HEAD) uses the checked-out branch."""
+    info = prinfo_mod.PRInfo()
+    event = getattr(args, "event_file", None)
+    if event:
+        info = prinfo_mod.from_event(event)
+    flags = prinfo_mod.PRInfo(
+        labels=list(getattr(args, "pr_label", None) or []),
+        author=getattr(args, "pr_author", None) or "",
+        branch=getattr(args, "pr_branch", None) or "",
+        title=getattr(args, "pr_title", None) or "")
+    body_file = getattr(args, "pr_body_file", None)
+    if body_file:
+        flags.body = _read_text_file(body_file, prinfo_mod.MAX_BODY)
+    info = prinfo_mod.merge(info, flags)
+    if not info.branch and args.head == "HEAD":
+        info.branch = _current_branch(root)
+    return info
 
 
 def run_check(args) -> CheckResult:
@@ -568,16 +649,55 @@ def run_check(args) -> CheckResult:
                 f"{base} is {ahead} commit(s) ahead of where this branch "
                 f"left it: verifying from the merge-base {fork[:12]}, so only "
                 f"this branch's own changes are scored")
-    prov = prov_mod.analyze(root, diff_base, head_sha, cfg["agent_markers"])
+    info = pr_info(args, root)
+    signals = prinfo_mod.detect_signals(info, cfg)
+    if os.environ.get("GITHUB_EVENT_NAME") == "pull_request_target":
+        msg = ("running under pull_request_target: the gates in "
+               ".pr-verify.yaml run commands on the PR's checked-out code, "
+               "with this workflow's secrets and write token. Check out the "
+               "PR only with --skip-gates, or use the pull_request event")
+        notes.append(msg)
+        _eprint("warning: " + msg)
+    prov = prov_mod.analyze(
+        root, diff_base, head_sha, cfg["agent_markers"],
+        pr_signal=prinfo_mod.signal_marker(signals[0]) if signals else None,
+        trailer_keys=markers_mod.parse_trailer_keys(cfg["agent_trailer_keys"]),
+        max_blame_files=getattr(args, "max_blame_files",
+                                prov_mod.DEFAULT_MAX_BLAME_FILES),
+        blame_budget=getattr(args, "blame_budget",
+                             prov_mod.DEFAULT_BLAME_BUDGET))
+    unverified = sorted(r for r, f in prov.items() if f.unverified)
+    if unverified:
+        notes.append(f"{len(unverified)} file(s) UNVERIFIED: the blame budget "
+                     f"(--max-blame-files / --blame-budget) ran out, so who "
+                     f"wrote their lines is unknown; they count as neither "
+                     f"human nor agent and the run requires review")
+    findings: list = []
+    violations: list = []
+    advisories: list = []
+    sensitive: list = []
     if prov:
         blast = br_mod.analyze(root, list(prov.keys()))
         gate_results = (gates_mod.run_gates(root, cfg["gates"], cfg["timeout"])
                         if not args.skip_gates else [])
+        patch = prov_mod._patch(root, diff_base, head_sha)
+        findings = integrity_mod.analyze(patch, prov)
+        violations = policy_mod.evaluate(prov, cfg)
+        sensitive = risk_mod._sensitive_hits(list(prov), cfg["sensitive_paths"])
+        text = info.text()
+        if text:
+            changed_text = [t for hs in integrity_mod.walk_hunks(patch).values()
+                            for h in hs for _, t in (*h.removed, *h.added)]
+            advisories = descdiff_mod.advisories(
+                text, sorted(prov), changed_text,
+                lambda rel: _file_at(root, head_sha, rel))
         # requires_review is computed from the SAME threshold the exit code
         # uses (a disabled gate can never require review).
         breakdown = risk_mod.score(prov, blast, gate_results,
                                    cfg["sensitive_paths"],
-                                   101 if min_score is None else min_score)
+                                   101 if min_score is None else min_score,
+                                   integrity_findings=len(findings),
+                                   policy_violations=len(violations))
     else:
         # Nothing added or deleted: nothing to scan or run, and nothing to
         # review whatever the threshold. The document below still has the
@@ -602,25 +722,45 @@ def run_check(args) -> CheckResult:
             rel: {"direct": b.direct, "transitive": b.transitive,
                   "external_only": b.external_only, "scan": b.scan}
             for rel, b in blast.items()},
-        "gates": [g.as_dict() for g in gate_results],
+        "gates": [dict(g.as_dict(), output_tail="")
+                  if getattr(args, "omit_gate_output", False)
+                  else g.as_dict() for g in gate_results],
+        "unverified_files": unverified,
+        "agent_signals": signals,
+        "policy": {"violations": [v.as_dict() for v in violations]},
+        "test_integrity": {"findings": [f.as_dict() for f in findings]},
+        "description_check": {"advisories": advisories},
+        "sensitive_files": sensitive,
     }
-    if any(not g.passed for g in gate_results):
+    depth = render_mod.review_depth(payload)
+    payload["review_depth"] = depth
+    if any(not g.passed for g in gate_results) or violations:
         # A failing policy gate is a failed verification, independent of
         # --fail-on: the tool cannot vouch for this diff.
         code = 1
     elif breakdown.requires_review:
+        code = 1
+    elif unverified and min_score is not None:
+        # fail closed: a diff that could not be attributed is not vouched for
         code = 1
     else:
         code = 0
     return CheckResult(code=code, payload=payload, prov=prov, blast=blast,
                        gates=gate_results, breakdown=breakdown,
                        min_score=min_score, base_detected=base_detected,
-                       notes=notes, nothing=not prov)
+                       notes=notes, nothing=not prov, signals=signals,
+                       violations=violations, findings=findings,
+                       advisories=advisories, depth=depth)
 
 
 def render(result: CheckResult, fmt: str) -> None:
     if fmt == "json":
         print(json.dumps(result.payload, indent=2))    # exact: JSON escapes
+    elif fmt == "sarif":
+        print(render_mod.sarif_text(result.payload), end="")   # JSON again
+    elif fmt == "comment":
+        for line in render_mod.to_comment(result.payload).rstrip("\n").split("\n"):
+            _out(line)
     elif result.nothing:
         for line in result.nothing_lines():
             _out(line)
@@ -646,6 +786,39 @@ def write_report(result: CheckResult, fmt: str) -> bool:
     return True
 
 
+def write_extra_files(result: CheckResult, args) -> bool:
+    """--sarif-file / --comment-file: the other renderings, written beside
+    the report. A file that cannot be written is one `error:` line (False)."""
+    for path, make in ((getattr(args, "sarif_file", None),
+                        lambda: render_mod.sarif_text(result.payload)),
+                       (getattr(args, "comment_file", None),
+                        lambda: render_mod.to_comment(result.payload))):
+        if not path:
+            continue
+        try:
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(make())
+        except OSError as e:
+            _eprint(f"error: could not write {path}: {e.strerror or e}")
+            return False
+    return True
+
+
+def cmd_trend(args) -> int:
+    from . import trend as trend_mod
+    try:
+        t = trend_mod.build(args.reports)
+    except (OSError, ValueError) as e:
+        _eprint(f"error: {getattr(e, 'strerror', None) or e}")
+        return 2
+    if args.format == "json":
+        print(json.dumps(t, indent=2))    # exact: JSON escapes
+    else:
+        for line in trend_mod.to_text(t):
+            _out(line)
+    return 0
+
+
 def cmd_check(args) -> int:
     _ensure_repo(args.root)
     try:
@@ -655,7 +828,29 @@ def cmd_check(args) -> int:
         return 2
     if not write_report(result, args.format):
         return 2
+    if not write_extra_files(result, args):
+        return 2
     return result.code
+
+
+def _nonneg(value: str) -> int:
+    try:
+        n = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected an integer, got {value!r}")
+    if n < 0:
+        raise argparse.ArgumentTypeError("must be 0 or more")
+    return n
+
+
+def _nonneg_float(value: str) -> float:
+    try:
+        n = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a number, got {value!r}")
+    if not n >= 0:
+        raise argparse.ArgumentTypeError("must be 0 or more")
+    return n
 
 
 def _score_arg(value: str) -> int:
@@ -698,13 +893,28 @@ def build_parser() -> argparse.ArgumentParser:
                         "verified, also when this is a subdirectory.")
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    def root_after(parser):
+        # `pr-verify check --root X` means the same as `pr-verify --root X
+        # check` (the Action's input is called root); SUPPRESS keeps the
+        # value given before the subcommand when this one is left out.
+        parser.add_argument("--root", default=argparse.SUPPRESS,
+                            help="Same as --root before the subcommand.")
+
     i = sub.add_parser("init", help="Write example .pr-verify.yaml.")
+    root_after(i)
     i.add_argument("--force", action="store_true",
                    help="Overwrite a .pr-verify.yaml that is already there "
                         "(without it init leaves the file alone and exits "
                         "2).")
 
+    t = sub.add_parser("trend", help="Show score and agent share across "
+                                     "earlier `check --format json` reports.")
+    t.add_argument("reports", nargs="+", metavar="REPORT.json",
+                   help="Reports in the order to show (oldest first).")
+    t.add_argument("--format", choices=["human", "json"], default="human")
+
     c = sub.add_parser("check", help="Verify a diff range.")
+    root_after(c)
     c.add_argument("--base", default=None,
                    help="Base ref (default: auto-detect — origin/HEAD, then "
                         "main, master, origin/main, origin/master; the "
@@ -719,7 +929,39 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Also verify untracked (not yet `git add`ed) files. "
                         "Off by default: snapshotting writes their content "
                         "into .git/objects (a dangling commit, pruned by gc).")
-    c.add_argument("--format", choices=["human", "json"], default="human")
+    c.add_argument("--format", choices=["human", "json", "sarif", "comment"],
+                   default="human",
+                   help="human report (default), the json document, a SARIF "
+                        "2.1.0 log (code scanning), or the markdown of the "
+                        "pull request comment (headline: Review depth: "
+                        "skim|normal|deep).")
+    c.add_argument("--sarif-file", metavar="PATH", default=None,
+                   help="Also write the SARIF 2.1.0 log to PATH, whatever "
+                        "--format is.")
+    c.add_argument("--comment-file", metavar="PATH", default=None,
+                   help="Also write the pull request comment (markdown) to "
+                        "PATH, whatever --format is.")
+    c.add_argument("--pr-label", action="append", default=None, metavar="NAME",
+                   help="A label on the pull request (repeatable). Matched "
+                        "against agent_labels in .pr-verify.yaml.")
+    c.add_argument("--pr-author", default=None, metavar="LOGIN",
+                   help="The pull request author's account, matched against "
+                        "agent_authors.")
+    c.add_argument("--pr-branch", default=None, metavar="NAME",
+                   help="The pull request's head branch, matched against "
+                        "agent_branches (default: the checked-out branch "
+                        "when --head is HEAD).")
+    c.add_argument("--pr-title", default=None,
+                   help="The pull request title, for the description-vs-diff "
+                        "advisory.")
+    c.add_argument("--pr-body-file", default=None, metavar="PATH",
+                   help="A file holding the pull request description, for "
+                        "the description-vs-diff advisory.")
+    c.add_argument("--event-file", default=None, metavar="PATH",
+                   help="A GitHub event payload (the Action passes "
+                        "$GITHUB_EVENT_PATH): labels, author, branch, title "
+                        "and description of the pull request are read from "
+                        "it; the --pr-* flags add to or override it.")
     c.add_argument("--fail-on", choices=["high", "any-risk", "never"],
                    default="high",
                    help="high: fail when score >= min-score (default); "
@@ -730,6 +972,18 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Score at which the verification fails (score >= N "
                         "fails, N included). Overrides risk_threshold from "
                         ".pr-verify.yaml (default 70).")
+    c.add_argument("--max-blame-files", type=_nonneg, default=prov_mod.DEFAULT_MAX_BLAME_FILES,
+                   metavar="N",
+                   help="Blame at most N changed files (default 1000, 0 = no "
+                        "limit); the rest are reported as unverified.")
+    c.add_argument("--blame-budget", type=_nonneg_float,
+                   default=prov_mod.DEFAULT_BLAME_BUDGET, metavar="SECONDS",
+                   help="Stop blaming after SECONDS (default 300, 0 = no "
+                        "limit); the remaining files are reported as "
+                        "unverified and the run requires review.")
+    c.add_argument("--omit-gate-output", action="store_true",
+                   help="Leave the tail of each gate's output out of the "
+                        "report (it can hold secrets or file paths).")
     c.add_argument("--skip-gates", action="store_true",
                    help="Do not run the policy gates from .pr-verify.yaml.")
     return p
@@ -742,7 +996,8 @@ def main(argv=None) -> int:
         # write, so a closed pipe would only show at the flush on the way out.
         with _stdout_may_close():
             args = build_parser().parse_args(argv)
-        return {"init": cmd_init, "check": cmd_check}[args.cmd](args)
+        return {"init": cmd_init, "check": cmd_check,
+                "trend": cmd_trend}[args.cmd](args)
     except OSError as e:
         # What the commands did not take care of themselves: a file or a
         # stream the operating system refused (a full disk behind `> file`).

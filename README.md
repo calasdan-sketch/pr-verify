@@ -6,14 +6,19 @@ review; this tells a senior exactly how deep to review, from observable
 facts: which lines an agent wrote, what could break, and whether policy
 gates pass.
 
+**Limits:** It reports facts about a pull request (who wrote which lines, what depends on them, whether your gates pass); it does not read the code for bugs, and `agent` signals are only as good as the commit trailers and bot names it can see.
+
 ## Install
 
 Stdlib only, Python 3.10+, needs the `git` command line tool on PATH.
 
 ```bash
-pip install git+https://github.com/calasdan-sketch/pr-verify
+pip install pr-verify
 pr-verify check
 ```
+
+From source (the latest, unreleased code):
+`pip install git+https://github.com/calasdan-sketch/pr-verify`
 
 Or run from a checkout without installing: `python3 -m pr_verify` from the
 repo root.
@@ -59,7 +64,7 @@ Start it anywhere inside the repository. The top level is found with `git
 rev-parse --show-toplevel` and everything — paths, blame, the snapshot of
 uncommitted changes, the blast-radius scan, the gates (which run from the
 top level) — is computed from there, so `pr-verify check` run from `src/`
-gives the same report as from the root. `--root <path>` takes any path
+gives the same report as from the root. `--root <path>` (before or after the subcommand) takes any path
 inside the repository, a subdirectory included, and still verifies the
 whole repository; the report adds a note when the top level is not the
 directory you gave. `pr-verify init` writes `.pr-verify.yaml` at the top
@@ -245,7 +250,12 @@ shell — `;`, `&&`, `$()`, pipes and the rest are literal arguments, never
 interpreted. A gate is a command string (split with the platform's rules —
 on Windows `C:\Python311\python.exe -m pytest` keeps its backslashes and
 `npx`/`npm`/`tsc` `.cmd` shims are found through `PATHEXT`) or a YAML list
-used as the argv as-is:
+used as the argv as-is. On Windows the program is looked up in `PATH` only:
+neither the working directory, the pull request's checkout (or anything
+below it) nor a relative `PATH` entry is searched, so a `python.bat` or
+`npx.cmd` added by a PR cannot stand in for the gate's program. A program
+found nowhere else fails the gate with exit 127 (to run a file from the
+repository, give its path: `.\tool.exe`).
 
 ```yaml
 gates:
@@ -256,7 +266,7 @@ gates:
 A failing gate fails the verification (exit 1) and the report ends with
 `✗ policy gate failed: <command>` — never a green tick.
 
-**Risk score** — deterministic 0–100 from six public factors:
+**Risk score** — deterministic 0–100 from eight public factors:
 
 | Factor | Max | What it measures |
 |---|---|---|
@@ -266,6 +276,8 @@ A failing gate fails the verification (exit 1) and the report ends with
 | gates | 10 | any policy gate failed |
 | no_tests | 5 | source changed with no test changes |
 | deletion | 50 | agent-attributed deletions: 45 if any deleted file is sensitive, else 10 for deleting tracked files at all, plus log-scaled points for the deleted files' dependents — pure-deletion PRs can trip the threshold too |
+| test_integrity | 15 | any [test-integrity finding](#test-integrity): an agent deleted, skipped, focused or loosened a test |
+| policy | 10 | any [policy rule](#policy-gates-as-code) violated (a violation also fails the check) |
 
 Test files are recognised by path component (`tests/`, `test/`,
 `__tests__/`, `spec/`) or filename pattern (`test_*.py`, `*_test.*`,
@@ -283,6 +295,110 @@ it. A list in the config replaces the default list, it does not extend it.
 Bands: 0–29 low · 30–69 medium · 70–100 high — labels only, they never
 decide pass/fail. The formula is documented so teams can argue with it and
 tune it — a black-box score is just another opinion.
+
+### Review depth
+
+Every report opens with one plain line, `Review depth: skim`, `normal` or
+`deep`, and the reasons under it. It is a pure function of the facts in the
+JSON document (the same document always gives the same word):
+
+| depth | when |
+|---|---|
+| **deep** | any of: the score reached `min-score` (or is in the high band), a policy gate failed, a policy rule was violated, there is a test-integrity finding, an agent deleted a file, an agent touched a sensitive file |
+| **skim** | none of the above and the score is under 30 |
+| **normal** | everything else |
+
+The description-vs-diff advisories never change it. The JSON has it as
+`review_depth: {"depth", "reasons"}`.
+
+### Agent signals beyond commit trailers
+
+Commits are one place an agent signs its work (the markers above). The pull
+request is another: Copilot's coding agent, Claude Code's GitHub integration,
+Cursor and Codex open `copilot/…`, `claude/…`, `cursor/…`, `codex/…`
+branches, often from a bot account, and teams label what an agent wrote. Three
+more signals are read, all by plain case-insensitive glob matching on the
+**whole** value, with the patterns in the config (read from the base ref):
+
+| setting | matched against | default patterns |
+|---|---|---|
+| `agent_labels` | each label on the PR | `ai-generated`, `ai-assisted`, `agent-authored`, `agent`, `claude`, `claude-code`, `copilot`, `codex`, `cursor` |
+| `agent_authors` | the PR author's account | `copilot`, `copilot-swe-agent[bot]`, `claude[bot]`, `cursoragent`, `devin-ai-integration[bot]`, … (see `DEFAULTS`) |
+| `agent_branches` | the head branch | `claude/*`, `copilot/*`, `cursor/*`, `codex/*` |
+| `agent_trailer_keys` | commit trailer **keys** that name an agent whatever the value | `claude-session: Claude` (Claude Code's `Claude-Session: <url>`) |
+
+Where the facts come from: the GitHub Action reads them from the event
+payload, a local run from flags — `--pr-label NAME` (repeatable),
+`--pr-author LOGIN`, `--pr-branch NAME` (default: the checked-out branch),
+`--event-file PATH` (a GitHub event JSON). When any signal matches, **every
+line of the pull request is scored as agent-written**, credited as
+`author (label:ai-generated)` / `(branch:claude/fix)` / `(author:…)`; a commit
+that a marker already matched keeps its marker. A signal can only raise
+scrutiny, and the patterns come from the base ref, so a PR cannot edit
+them away. The signals found are in the JSON (`agent_signals`) and the
+report. The default names of bot accounts are the ones these products are
+known to use; they were not checked against live GitHub accounts, so add the
+login your PRs really come from.
+
+### Test integrity
+
+An agent that cannot make a test pass has cheap ways out. For the lines an
+agent is credited with in **test files** (Python and JavaScript/TypeScript in
+depth; Go, Java/Kotlin, Ruby and Rust for the disable markers), these are
+reported — each with file, line and a plain sentence:
+
+| rule | what |
+|---|---|
+| `deleted-test-file` | a test file an agent deleted |
+| `deleted-test` | a test function removed and not added back anywhere in the change (a rename or move is not one) |
+| `removed-assertions` | a test file with fewer assertions after the change (a warning) |
+| `disabled-test` | a skip / xfail / `.skip` / `.todo` / `xit` / `t.Skip` / `@Ignore` / `@Disabled` / `#[ignore]` marker **added** |
+| `focused-test` | `.only`, `fit`, `fdescribe`: the other tests stop running |
+| `loosened-assertion` | an assertion replaced in the same hunk by a weaker one (`assertEqual` → `assertTrue`, `==` → bare `assert`, `toEqual` → `toBeDefined`) |
+| `tautology-assertion` | an assertion that cannot fail was added (`assert True`, `expect(1).toBe(1)`) |
+
+It is pattern matching on the diff, no parser. Added lines are attributed by
+`git blame` (exact). Removed lines have no author, so a removal counts when
+the file lost lines to an agent's commits (approximate: a human who removes a
+test in a file an agent also edited is read as the agent's). The rules are
+tables in `testintegrity.py`, one tested example per row. Any finding adds
+the `test_integrity` factor (15) and makes the review depth `deep`.
+
+### Policy gates as code
+
+Rules in `.pr-verify.yaml` (so, from the base ref: the PR cannot loosen
+them). A violation is a plain sentence, fails the check (exit 1) like a
+failed gate and adds the `policy` factor (10). All are off until set:
+
+```yaml
+protected_paths:            # nobody's change to these passes
+  - "infra/**"
+agent_forbidden_paths:      # an agent's change to these does not (humans may)
+  - "@ci"                   # preset: .github/workflows/**, .gitlab-ci.yml, .circleci/**, Jenkinsfile, ...
+  - "@lockfiles"            # preset: package-lock.json, yarn.lock, poetry.lock, Cargo.lock, go.sum, ...
+max_changed_files: 40       # change budget; 0 = none
+max_changed_lines: 800      # added + removed lines; 0 = none
+tests_must_change: true     # source changed with no test file changed fails
+```
+
+Globs are the `.gitignore` kind on the repo-relative path, without regard to
+case: `*` is anything but `/`, `**` any number of directories, a pattern
+without `/` matches that name at any depth (`*.lock`), a trailing `/` means
+the directory. "Source" for `tests_must_change` is a file with a code
+extension that is not a test file.
+
+### description-vs-diff (advisory)
+
+If the pull request's title or description is known (the Action reads it from
+the event; locally `--pr-title TEXT` and `--pr-body-file PATH`), the report
+lists what it mentions that the change does not touch: a **file** path that is
+not among the changed files (`src/auth.py` matches `app/src/auth.py`; a bare
+`name.py` counts only in backticks, so `Node.js` is not a file), and a
+backticked **symbol** that looks like code (`snake_case`, `camelCase`,
+`a.b`, `f()`) found in none of the added or removed lines and none of the
+changed files. Fenced code blocks, HTML comments and URLs in the text are
+skipped. No LLM, no score, no effect on the exit status or the review depth:
+a hint that the text was written for a different change.
 
 ### The gate — one rule
 
@@ -305,6 +421,28 @@ short quietly — no traceback — and the exit status stays 0 for a pass and 1
 for a fail. The same holds for `--help`, `--version` and error messages (2
 stays 2), and on Windows, where such a pipe is not a `BrokenPipeError` but
 an `OSError` with errno 22 that shows up when the output is flushed.
+
+## Trust, size limits and trend
+
+**`pull_request_target` is not safe with gates.** Gates in `.pr-verify.yaml`
+(read from the base branch) run commands on the checked-out tree. If a
+workflow triggered by `pull_request_target` checks out the PR head, those
+commands execute PR-controlled code with the workflow's secrets and a write
+token. pr-verify prints a warning when `GITHUB_EVENT_NAME` is
+`pull_request_target`; use the `pull_request` event, or pass `--skip-gates`.
+
+**Gate output.** The PR comment names failed gates but does not include their
+output. `--format json` does include the last 2000 characters of each gate's
+output (`output_tail`); if you publish the JSON (artifacts, comments), add
+`--omit-gate-output`.
+
+**Big PRs.** Blame stops after `--max-blame-files` files (default 1000) or
+`--blame-budget` seconds (default 300); `0` means no limit. Files not blamed
+are listed under `unverified_files`, count as neither human nor agent, and the
+run exits 1 (unless the score gate is off with `--fail-on never`).
+
+**Trend.** `pr-verify trend old.json new.json` prints score and agent share
+for earlier `check --format json` reports, oldest first.
 
 ## Uncommitted changes and the snapshot
 
@@ -352,7 +490,10 @@ file that is not a mapping of settings, a bare list for one. Each is exit 2
 with one `error:` line that names the file and, for a YAML problem, the line.
 
 The settings are `agent_markers`, `sensitive_paths`, `gates`,
-`risk_threshold` and `timeout`. A key that is none of them is not an error
+`risk_threshold`, `timeout`, and, from 0.2.0, `agent_labels`, `agent_authors`,
+`agent_branches`, `agent_trailer_keys`, `protected_paths`,
+`agent_forbidden_paths`, `max_changed_files`, `max_changed_lines` and
+`tests_must_change` (sections above). A key that is none of them is not an error
 (a file that works keeps working), but it does nothing, and a `gate:` that
 was meant to fail the build must not pass for want of an `s`. So each one is
 named on stderr, with the setting it looks like when there is one:
@@ -369,7 +510,18 @@ the report, its format and the exit status are what they would be without it.
 
 ```bash
 python3 -m pr_verify check --base origin/main --format json --min-score 60
+python3 -m pr_verify check --base origin/main --format sarif > pr-verify.sarif
+python3 -m pr_verify check --base origin/main --format comment   # the PR comment, markdown
 ```
+
+`--format sarif` prints a SARIF 2.1.0 log (policy violations, test-integrity
+findings, failed gates, sensitive files and the advisories, each with a file
+and line, for GitHub code scanning); `--format comment` prints the markdown of
+the sticky pull request comment, whose headline is `Review depth:
+skim|normal|deep`. `--sarif-file PATH` and `--comment-file PATH` write those
+two beside whatever `--format` prints. File names and descriptions in the
+comment are the PR author's words, so they are escaped: code spans that
+nothing can break out of, no `@mention` that pings, no HTML, no links.
 
 `--format json` prints one JSON document and nothing else. With nothing to
 verify (no line added or deleted between base and head) it is still that
@@ -391,11 +543,43 @@ default branch is `main`; pin to it (or to a tag once one exists):
   with:
     base: origin/main      # --base (empty = auto-detect; be explicit in CI)
     head: HEAD             # --head
-    format: human          # --format human|json
+    format: human          # --format human|json|sarif|comment
     fail-on: high          # --fail-on high|any-risk|never
     min-score: "60"        # --min-score (empty = risk_threshold from config)
     skip-gates: "false"    # --skip-gates
     root: ""               # --root (empty = the checked-out repo)
+    sarif-file: ""         # --sarif-file (write a SARIF 2.1.0 log here)
+    comment: "false"       # post ONE sticky PR comment, updated on every push
+    github-token: ${{ github.token }}   # needs pull-requests: write for the comment
+    step-summary: "true"   # same markdown in the job summary
+```
+
+**Permissions.** The check itself needs `contents: read`. The sticky comment
+needs `pull-requests: write` on the token (`permissions:` on the job), and
+uploading the SARIF file with `github/codeql-action/upload-sarif` needs
+`security-events: write` (that is that action's requirement, not this one's).
+A pull request from a **fork** gets a read-only token, so the comment cannot
+be posted: the Action says so in one warning and the check goes on; the job
+summary still has the markdown. The comment is posted with the Python
+standard library (`urllib`) to `$GITHUB_API_URL`, which must be https; it
+looks for its own comment by a hidden marker and updates it, so a PR has one
+comment, not one per push. Nothing is installed. The labels, author, branch,
+title and description for the agent signals and the advisory come from
+`$GITHUB_EVENT_PATH`, which the Action passes as `--event-file`.
+
+```yaml
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write     # only to upload the SARIF file
+steps:
+  - uses: actions/checkout@v4
+    with: { fetch-depth: 0 }
+  - uses: calasdan-sketch/pr-verify@main
+    with: { base: origin/main, comment: "true", sarif-file: pr-verify.sarif }
+  - uses: github/codeql-action/upload-sarif@v3
+    if: always()
+    with: { sarif_file: pr-verify.sarif }
 ```
 
 Outputs: `score`, `band`, `requires-review`, `exit-code`. `exit-code` is
@@ -434,6 +618,9 @@ compares, so the output below cannot drift from the code:
 
   base: main  (auto-detected)
 
+  Review depth: deep
+    an agent touched 1 sensitive file(s)
+
   provenance: 9/13 added lines agent-authored
     agent   app/auth.py (4/4 agent) [claude-bot (claude)]
     mixed   app/core.py (4/8 agent) [claude-bot (claude)]
@@ -449,12 +636,14 @@ compares, so the output below cannot drift from the code:
     none configured
 
   risk factors:
-     28 pts  agent_share  9/13 added lines agent-authored (69%)
-      4 pts  blast        largest blast radius: 1 downstream dependent(s)
-     20 pts  sensitive    sensitive files touched: app/auth.py
-      0 pts  gates        no gates configured
-      5 pts  no_tests     source changed with no test changes
-      0 pts  deletion     no agent-attributed deletions
+     28 pts  agent_share    9/13 added lines agent-authored (69%)
+      4 pts  blast          largest blast radius: 1 downstream dependent(s)
+     20 pts  sensitive      sensitive files touched: app/auth.py
+      0 pts  gates          no gates configured
+      5 pts  no_tests       source changed with no test changes
+      0 pts  deletion       no agent-attributed deletions
+      0 pts  test_integrity no test-integrity findings
+      0 pts  policy         no policy violations
 
   ✓ score 57 < min-score 70
 ════════════════════════════════════════════════════════
@@ -506,12 +695,23 @@ compares, so the output below cannot drift from the code:
 - The blast radius is read from the files in the worktree, whatever
   `--head` says: to verify a branch other than the checked-out one, check
   it out.
+- Test integrity is pattern matching on the diff of test files, not a parse:
+  a skip written some way the tables do not list is not seen, a loosened
+  assertion is only noticed in the same hunk as the one it replaced, and an
+  agent's removal of a test is judged by whole-file attribution (see above).
+  A PR-level agent signal (label, bot author, `claude/` branch) makes every
+  line of the PR count as the agent's, including a human's commits on that
+  branch.
+- The description check finds words, not meaning: it cannot tell that a text
+  describes the wrong change, only that it names a file or symbol the change
+  does not touch, and it is blind to a symbol only reached through a
+  different name.
 - The risk formula is a starting point, not a verdict — tune the threshold
   per team.
 
 ## Windows
 
-Works on Windows 11 / Python 3.11: git output is decoded as UTF-8 (paths
+Written for Windows (developed on Linux; what is proven is what this repo's CI matrix runs: Ubuntu, Windows and macOS on Python 3.10, 3.12 and 3.14): git output is decoded as UTF-8 (paths
 included), the report survives a cp1252 console (unencodable marks are
 replaced instead of crashing), gate commands are split with Windows rules
 and their executables resolved through `PATHEXT`, and the test suite uses
@@ -539,7 +739,7 @@ names), JSON for a range with nothing to verify, and a scan of the
 repository's own files for invisible characters.
 
 This repo's own CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml))
-runs the suite on Ubuntu, Windows and macOS with Python 3.11, 3.12 and
-3.13, and on Python 3.10 (the oldest supported) on Ubuntu. That floor
-matters: argparse on 3.10 does not ignore a failed write of its help text,
+runs the suite on Ubuntu, Windows and macOS with Python 3.10 (the oldest
+supported), 3.12 and 3.14, and a second job builds the package, runs
+`twine check --strict` and installs the wheel. That floor matters: argparse on 3.10 does not ignore a failed write of its help text,
 so `--help | head -0` needed its own handling there.

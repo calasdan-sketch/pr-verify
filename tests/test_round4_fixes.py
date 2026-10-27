@@ -1840,7 +1840,7 @@ class TestTerminalSafety(unittest.TestCase):
         # document is the one thing printed as it is. A bare print()
         # somewhere else would skip the escaping.
         allowed = {("cli.py", "_out"), ("cli.py", "_eprint"),
-                   ("cli.py", "render")}
+                   ("cli.py", "render"), ("cli.py", "cmd_trend")}  # JSON
         stray = []
 
         def walk(node, module, func):
