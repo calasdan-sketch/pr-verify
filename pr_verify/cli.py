@@ -31,9 +31,11 @@ from . import blastradius as br_mod
 from . import config as config_mod
 from . import gates as gates_mod
 from . import provenance as prov_mod
+from . import mdreport
 from . import risk as risk_mod
+from . import textsafe
 
-VERSION = "0.1.3"
+VERSION = "0.2.0"
 
 #: Tried in order when --base is not given (after origin/HEAD).
 BASE_CANDIDATES = ("main", "master", "origin/main", "origin/master")
@@ -115,23 +117,9 @@ def _flush_stdout() -> None:
         _discard(sys.stdout)
 
 
-#: What a terminal acts on, and so is never printed as it is: the C0
-#: controls (tab and newline apart), DEL, the C1 controls (U+009B is CSI,
-#: one character for ESC [), the Unicode line and paragraph separators and
-#: the bidirectional overrides and isolates (they reorder what is on
-#: screen). Each is shown as the escape Python writes for it, \x1b for ESC,
-#: so the text stays readable and nothing is lost.
-_ESCAPES = {
-    cp: ("\\x%02x" if cp < 0x100 else "\\u%04x") % cp
-    for cp in (*range(0x00, 0x09), *range(0x0B, 0x20), *range(0x7F, 0xA0),
-               0x2028, 0x2029, *range(0x202A, 0x202F),
-               *range(0x2066, 0x206A))}
-
-
-def _neutralize(text: str) -> str:
-    """text with every character a terminal acts on shown as a visible
-    escape (\\x1b for ESC). Tab and newline are text and stay."""
-    return text.translate(_ESCAPES)
+#: What a terminal acts on is shown as a visible escape (see textsafe.py).
+_ESCAPES = textsafe.ESCAPES
+_neutralize = textsafe.neutralize
 
 
 def _one_line(text: str) -> str:
@@ -355,19 +343,21 @@ def _blast_tail(b: "br_mod.BlastRadius") -> str:
     """Why a changed file shows no dependents, when that is because the
     scan could not see it (a bare "0 downstream dependent(s)" reads as
     "looked, found nothing")."""
-    if not b.external_only:
-        return ""
-    if b.scan == "not_source":
-        ext = os.path.splitext(b.file)[1].lower()
-        what = f"{ext} files are" if ext else "this file type is"
-        return f"  ({what} not scanned for imports)"
-    if b.scan == "not_in_worktree":
-        why = "not in the worktree"
-    elif b.scan == "skipped_dir":
-        why = f"in {br_mod.skipped_dir(b.file)}/, which the import scan skips"
-    else:
-        why = "not reached by the import scan"
-    return f"  ({why}; nothing in-repo imports it)"
+    note = mdreport.blast_note(b)
+    return f"  ({note})" if note else ""
+
+
+#: Lines of a failed gate's output shown under it in the human report.
+GATE_TAIL_LINES = 8
+
+
+def _gate_tail(text: str) -> list[str]:
+    """The last GATE_TAIL_LINES non-blank lines of a gate's output: why it
+    failed, without a rerun. Each is printed through _out, so what the gate
+    printed (the PR's own code ran in it) is neutralized like a file name."""
+    lines = [line.rstrip() for line in (text or "").split("\n")]
+    lines = [line for line in lines if line.strip()]
+    return lines[-GATE_TAIL_LINES:]
 
 
 def _report_human(result: "CheckResult") -> None:
@@ -421,6 +411,9 @@ def _report_human(result: "CheckResult") -> None:
     for g in gate_results:
         mark = "PASS" if g.passed else ("TIMEOUT" if g.timed_out else "FAIL")
         _out(f"    [{mark}] {g.command}")
+        if not g.passed and not result.hide_gate_output:
+            for line in _gate_tail(g.output_tail):
+                _out(f"      | {line}")
     _out()
     _out("  risk factors:")
     for name, fac in breakdown.factors.items():
@@ -460,6 +453,9 @@ class CheckResult:
     base_detected: bool = False
     notes: list = dataclasses.field(default_factory=list)
     nothing: bool = False     # no added/deleted lines in the range
+    #: leave the gates' output out of the human and Markdown reports (the
+    #: JSON keeps it): --hide-gate-output
+    hide_gate_output: bool = False
 
     def nothing_lines(self) -> list[str]:
         """What the human report says when there is nothing to verify: one
@@ -615,12 +611,20 @@ def run_check(args) -> CheckResult:
     return CheckResult(code=code, payload=payload, prov=prov, blast=blast,
                        gates=gate_results, breakdown=breakdown,
                        min_score=min_score, base_detected=base_detected,
-                       notes=notes, nothing=not prov)
+                       notes=notes, nothing=not prov,
+                       hide_gate_output=bool(
+                           getattr(args, "hide_gate_output", False)))
 
 
 def render(result: CheckResult, fmt: str) -> None:
     if fmt == "json":
         print(json.dumps(result.payload, indent=2))    # exact: JSON escapes
+    elif fmt == "markdown":
+        # each line through _out: mdreport has already put every name in a
+        # code span, and _out keeps a line from reading as a workflow
+        # command when the report is printed into an Actions log
+        for line in mdreport.render(result).rstrip("\n").split("\n"):
+            _out(line)
     elif result.nothing:
         for line in result.nothing_lines():
             _out(line)
@@ -719,7 +723,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Also verify untracked (not yet `git add`ed) files. "
                         "Off by default: snapshotting writes their content "
                         "into .git/objects (a dangling commit, pruned by gc).")
-    c.add_argument("--format", choices=["human", "json"], default="human")
+    c.add_argument("--format", choices=["human", "json", "markdown"],
+                   default="human",
+                   help="human (default), json (one document, every number) "
+                        "or markdown (for a pull request comment or a job "
+                        "summary; names shown literally, never as links "
+                        "or HTML).")
     c.add_argument("--fail-on", choices=["high", "any-risk", "never"],
                    default="high",
                    help="high: fail when score >= min-score (default); "
@@ -732,6 +741,12 @@ def build_parser() -> argparse.ArgumentParser:
                         ".pr-verify.yaml (default 70).")
     c.add_argument("--skip-gates", action="store_true",
                    help="Do not run the policy gates from .pr-verify.yaml.")
+    c.add_argument("--hide-gate-output", action="store_true",
+                   help="Leave what a failed gate printed out of the human "
+                        "and Markdown reports (and the Action's job "
+                        "summary); --format json keeps it. A gate runs the "
+                        "PR's code: use this when the report is posted "
+                        "where secrets must not appear, a PR comment."),
     return p
 
 

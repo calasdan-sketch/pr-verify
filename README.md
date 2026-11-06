@@ -1,10 +1,15 @@
 # PR Verify
 
-Deterministic trust for agent-authored PRs. Not another AI reviewer —
-**verification, not opinion.** Agents now write more code than seniors can
-review; this tells a senior exactly how deep to review, from observable
-facts: which lines an agent wrote, what could break, and whether policy
-gates pass.
+**Which lines of this pull request did an AI agent write, what can they
+break, and how hard should a human look?** Answered from git history and
+import graphs, deterministically, with no LLM, no account and no
+dependencies.
+
+Not another AI reviewer — **verification, not opinion.** Agents now write
+more code than seniors can review; this tells a senior exactly how deep to
+review, from observable facts: which lines an agent wrote, what could break,
+and whether policy gates pass. The same commits always get the same score,
+and every point of it is explained.
 
 ## Install
 
@@ -25,6 +30,7 @@ cd your-repo
 pr-verify init            # write .pr-verify.yaml with every default spelled out (commit it to your base branch)
 pr-verify check           # base auto-detected: origin/HEAD, then main, master, origin/main, origin/master
 pr-verify check --base origin/main --format json --min-score 60
+pr-verify check --format markdown --hide-gate-output > report.md   # for a PR comment: gh pr comment --body-file report.md
 ```
 
 `pr-verify init` will not overwrite a `.pr-verify.yaml` that is already there
@@ -64,6 +70,26 @@ inside the repository, a subdirectory included, and still verifies the
 whole repository; the report adds a note when the top level is not the
 directory you gave. `pr-verify init` writes `.pr-verify.yaml` at the top
 level, where the base ref's copy is read from.
+
+## How it compares
+
+Other tools answer neighbouring questions. Only what their own pages say is
+listed here; pick by the question you need answered.
+
+| | PR Verify | [Git AI](https://usegitai.com/detect-ai-code) | [Koalr deploy risk](https://dev.to/koalrapp/we-scored-28-famous-open-source-prs-for-deploy-risk-55bj) | [pr-impact](https://awesome.ecosyste.ms/projects/github.com%2Fducdmdev%2Fpr-impact) | AI reviewers (CodeRabbit, Qodo, ...) |
+|---|---|---|---|---|---|
+| What it tells you | who wrote each changed line (agent or human), blast radius, gate results, a 0-100 score | which agent, model and prompt wrote each line | a 0-100 deploy-risk score from 36 signals | breaking changes, blast radius, a 0-100 score | review comments |
+| How | git blame + commit authors and trailers, import graph | the agents report their lines at commit time | a hosted service | Claude reads the diff | an LLM reads the diff |
+| Needs | `git` and Python; nothing installed where the agents run | its extension installed where the agents run, before the code is written | an account | Claude | an account, usually paid |
+| Works on PRs already written | yes, from history | only for code written while it was installed | yes | yes | yes |
+| Deterministic, formula published | yes ([the factors](#what-it-reports)) | n/a (records, does not score) | not stated | weights published; the analysis is an LLM's | no |
+| Open source | MIT | yes | no | yes | varies |
+
+Git AI's own limitations page says attribution is only partly kept through
+the squash and rebase merges a host does on its server, and lost through
+renames ([source](https://deepwiki.com/acunniffe/git-ai/13-limitations-and-future-work));
+PR Verify has the mirror-image limit (see Honest limits): it can only see
+what the commits say. The two can work together.
 
 ## What it reports
 
@@ -111,7 +137,10 @@ prose:
   body, matched by the same rules (`Co-Authored-By: Claude
   <noreply@anthropic.com>`). Two lines Claude Code leaves count as well:
   its footer `Generated with [Claude Code](...)` (the bracketed text is the
-  name) and the `Claude-Session:` trailer;
+  name) and the `Claude-Session:` trailer. `Agent-Logs-Url:`, the trailer
+  Copilot's coding agent writes into its commits
+  ([GitHub changelog](https://github.blog/changelog/2026-03-20-trace-any-copilot-coding-agent-commit-to-its-session-logs)),
+  counts as Copilot (marker `copilot`), also when a human is the author;
 - a marker containing an `@` is one exact address, compared whole and
   without case, never read as a name. The default
   `co-authored-by: noreply@anthropic.com` is how Claude Code's own trailer
@@ -129,7 +158,18 @@ human on your team commits as a single word that is also a marker (`Cody`),
 drop that marker and rely on trailers. A list of `agent_markers` in
 `.pr-verify.yaml` replaces the defaults, it does not extend them: keep
 `"co-authored-by: noreply@anthropic.com"` in it (quoted - it contains a
-colon) to keep catching Claude Code.
+colon) to keep catching Claude Code. To add your own bot and keep every
+default, use `extra_agent_markers` instead:
+
+```yaml
+extra_agent_markers:
+  - release-bot
+```
+
+A config that leaves no marker at all (`agent_markers: []`) is refused (exit
+2, `agent_markers is empty`): with no marker every line would read as human
+and the score could never see agent code, which is a broken setup, not a
+clean pull request.
 
 Non-ASCII file names (`app/Καλάς.py`) are files of their own: git is run
 with `core.quotePath=false` and quoted diff headers are unescaped, so
@@ -254,7 +294,11 @@ gates:
 ```
 
 A failing gate fails the verification (exit 1) and the report ends with
-`✗ policy gate failed: <command>` — never a green tick.
+`✗ policy gate failed: <command>` — never a green tick. It also says why:
+the last 8 lines of the gate's output are printed under it (`| AssertionError:
+...`), escaped like every other text from the PR, so a CI log shows the
+failure without a rerun (the JSON has the last 2,000 characters in
+`gates[].output_tail`).
 
 **Risk score** — deterministic 0–100 from six public factors:
 
@@ -278,7 +322,11 @@ match without regard to case, so `Login.tsx`, `PASSWORD.txt` and
 `src/Auth/Index.ts` count. See `DEFAULTS` in `config.py` for the full list
 and override `sensitive_paths` in your config; `pr-verify init` writes
 every default out, so the file it creates changes nothing until you edit
-it. A list in the config replaces the default list, it does not extend it.
+it. A list in the config replaces the default list, it does not extend it;
+`extra_sensitive_paths` adds globs and keeps the defaults
+(`extra_sensitive_paths: ["**/billing_v2/**"]`). A config that leaves no
+glob at all (`sensitive_paths: []`) is refused, exit 2 (`sensitive_paths is
+empty`), as an empty marker list is: the sensitive factor could never score.
 
 Bands: 0–29 low · 30–69 medium · 70–100 high — labels only, they never
 decide pass/fail. The formula is documented so teams can argue with it and
@@ -352,7 +400,9 @@ file that is not a mapping of settings, a bare list for one. Each is exit 2
 with one `error:` line that names the file and, for a YAML problem, the line.
 
 The settings are `agent_markers`, `sensitive_paths`, `gates`,
-`risk_threshold` and `timeout`. A key that is none of them is not an error
+`risk_threshold`, `timeout`, and `extra_agent_markers` and
+`extra_sensitive_paths`, which are added to the first two (in that order;
+an entry already there is not repeated). A key that is none of them is not an error
 (a file that works keeps working), but it does nothing, and a `gate:` that
 was meant to fail the build must not pass for want of an `s`. So each one is
 named on stderr, with the setting it looks like when there is one:
@@ -378,6 +428,47 @@ is `[]`, `risk.score` is 0 (`low`, `requires_review` false) and the exit
 status is 0; `notes` and `untracked_skipped` say what was left out. The
 human format says `no added lines in main..HEAD — nothing to verify`.
 
+### Markdown: PR comments and job summaries
+
+`--format markdown` prints the report as GitHub-flavoured Markdown: the
+verdict, the factor table, the gates (a failed one with its output in a
+collapsed block), the files and the blast radius. Post it with `gh pr
+comment <n> --body-file report.md`, or let the Action put it on the run's
+summary page (below). It has the same verdict and numbers as the other
+formats.
+
+**A PR comment is not masked.** A failed gate's output is the PR's own code
+talking, and GitHub masks the secrets it knows of in the step's log, not in
+a comment you post. For a comment, add `--hide-gate-output`: the report then
+lists each gate with PASS/FAIL and its exit status and leaves out what it
+printed (`--format json` keeps it, in `gates[].output_tail`). Whether GitHub
+masks secrets in the job summary is not something this project has been able
+to confirm; set the Action's `hide-gate-output: "true"` if your gates could
+print one.
+
+Every name in it comes from the PR, and Markdown is code: a file called
+`![x](https://tracker.example/p.png).py` would load that image for everyone
+who opens the page, and `[docs](https://...)` would be a link that reads as
+the tool's own. So every file name, author name, note and line of gate output
+is written inside a code span or a fenced code block whose fence is longer
+than any run of backticks in the text: GitHub shows it literally — no link,
+no image, no HTML, no autolink — and a `|` cannot split a table cell. Control
+and bidi characters are escaped as in the human report. The suite checks this
+with hostile file names and extensions (`p.![i](https:1572395042)`), and
+renders the report with a real GFM renderer, `cmarkgfm`, when it is
+installed. The package and the suite do not need it; this repo's CI installs
+it on one Ubuntu job and makes that test required there
+(`PR_VERIFY_REQUIRE_GFM=1`), so it is never silently skipped in CI.
+
+The report stays under 60,000 characters. The verdict, the factor table and
+the list of gates with PASS/FAIL are always there; the rest is added an entry
+at a time while it fits: at most 5 failed gates' output (each block at most 30
+lines and 4,000 characters, counted after escaping, which can make one
+character six), 100 file rows and 8 blast radius entries, and each section
+says how many it left out. A PR cannot blank a section by making one entry
+huge. Names longer than 200 characters are shortened in the middle.
+`--format json` always has everything.
+
 ### GitHub Action
 
 `action.yml` at the repo root is a composite action. Its inputs are the
@@ -391,12 +482,20 @@ default branch is `main`; pin to it (or to a tag once one exists):
   with:
     base: origin/main      # --base (empty = auto-detect; be explicit in CI)
     head: HEAD             # --head
-    format: human          # --format human|json
+    format: human          # --format human|json|markdown
     fail-on: high          # --fail-on high|any-risk|never
     min-score: "60"        # --min-score (empty = risk_threshold from config)
     skip-gates: "false"    # --skip-gates
+    hide-gate-output: "false"  # --hide-gate-output (true: no gate output in the log report or job summary)
     root: ""               # --root (empty = the checked-out repo)
 ```
+
+The Action also appends the Markdown report to `$GITHUB_STEP_SUMMARY`, so the
+verdict, the factors and the reason a gate failed are on the run's summary
+page, not only in the log; a check that could not run says so there too, and
+so does one whose report could not be written to the log (exit 2), never
+with the pass or fail the log did not get. A summary file that cannot be
+written is a warning, and the verdict stands.
 
 Outputs: `score`, `band`, `requires-review`, `exit-code`. `exit-code` is
 always set - 0 pass, 1 fail, 2 when the check could not run (an input the
@@ -506,6 +605,11 @@ compares, so the output below cannot drift from the code:
 - The blast radius is read from the files in the worktree, whatever
   `--head` says: to verify a branch other than the checked-out one, check
   it out.
+- A failed gate's last lines are printed in the report (log and job
+  summary). A gate runs the PR's code, and what it prints is shown: keep
+  secrets out of gate output, and use `--hide-gate-output` for anything
+  posted as a PR comment (GitHub masks the secrets it knows of in logs, not
+  in comments; a pull request from a fork gets no secrets).
 - The risk formula is a starting point, not a verdict — tune the threshold
   per team.
 
@@ -535,8 +639,9 @@ the way Windows reports it, faked on every platform), a PR's
 `.gitattributes` and a user's git settings that would change the diff, text
 that tries to forge git's own records (separators in commit messages and
 file lines) or the report itself (control characters and newlines in
-names), JSON for a range with nothing to verify, and a scan of the
-repository's own files for invisible characters.
+names), JSON for a range with nothing to verify, the Markdown report against
+hostile file names (links, images, HTML, pipes, backticks) and a 1,500-file
+PR, and a scan of the repository's own files for invisible characters.
 
 This repo's own CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml))
 runs the suite on Ubuntu, Windows and macOS with Python 3.11, 3.12 and

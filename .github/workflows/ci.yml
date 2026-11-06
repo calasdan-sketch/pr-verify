@@ -34,7 +34,16 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Install
         run: pip install .
+      # On one job, a real GFM renderer for the Markdown report's tests
+      # (tests/test_synapse1.py): with PR_VERIFY_REQUIRE_GFM=1 they must run
+      # there, a missing renderer fails instead of skipping. A test tool
+      # only; the package itself installs nothing.
+      - name: Install the GFM renderer the Markdown tests use
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.13'
+        run: pip install "cmarkgfm==2025.10.22"
       - name: Test
+        env:
+          PR_VERIFY_REQUIRE_GFM: ${{ matrix.os == 'ubuntu-latest' && matrix.python == '3.13' && '1' || '' }}
         run: python -m unittest discover -s tests
       - name: Smoke-test the console script
         run: pr-verify --version

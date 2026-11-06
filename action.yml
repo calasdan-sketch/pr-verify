@@ -10,7 +10,7 @@ inputs:
     required: false
     default: HEAD
   format:
-    description: Report format, human or json (same as --format).
+    description: Report format, human, json or markdown (same as --format). The job summary is always Markdown.
     required: false
     default: human
   fail-on:
@@ -23,6 +23,10 @@ inputs:
     default: ""
   skip-gates:
     description: Set to true to skip the policy gates (same as --skip-gates).
+    required: false
+    default: "false"
+  hide-gate-output:
+    description: Set to true to leave what a failed gate printed out of the log report and the job summary (same as --hide-gate-output); the json format keeps it.
     required: false
     default: "false"
   root:
@@ -54,6 +58,7 @@ runs:
         PR_VERIFY_FAIL_ON: ${{ inputs.fail-on }}
         PR_VERIFY_MIN_SCORE: ${{ inputs.min-score }}
         PR_VERIFY_SKIP_GATES: ${{ inputs.skip-gates }}
+        PR_VERIFY_HIDE_GATE_OUTPUT: ${{ inputs.hide-gate-output }}
         PR_VERIFY_ROOT: ${{ inputs.root }}
       # -I: the checkout (the working directory) is data, never imported from;
       # see run_action.py. Nothing to install: pr-verify has no dependencies.

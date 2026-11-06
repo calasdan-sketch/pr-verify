@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import difflib
 import json
-import os
 import subprocess
 
+from . import markers as markers_mod
 from . import miniyaml
 
 CONFIG_FILE = ".pr-verify.yaml"
@@ -59,6 +59,12 @@ DEFAULTS = {
     # executables with arguments — no pipes, redirects, or $VARs.
     "gates": [],
     # "gates": ["python -m pytest -x -q"],
+    # Added to agent_markers / sensitive_paths instead of replacing them: the
+    # way to add your own bot or your own sensitive folder and keep every
+    # default (a list under agent_markers drops them, Claude Code's address
+    # included).
+    "extra_agent_markers": [],
+    "extra_sensitive_paths": [],
     "risk_threshold": 70,   # score >= this fails (see risk.gate); --min-score overrides
     "timeout": 300,         # seconds per gate
 }
@@ -108,7 +114,8 @@ def _read_base_config(root: str, base: str) -> dict:
 
 
 _INT_FIELDS = {"risk_threshold": (0, 100), "timeout": (1, None)}
-_LIST_FIELDS = ("agent_markers", "sensitive_paths", "gates")
+_LIST_FIELDS = ("agent_markers", "sensitive_paths", "gates",
+                "extra_agent_markers", "extra_sensitive_paths")
 
 
 def _as_gate(g) -> str | list[str]:
@@ -172,9 +179,35 @@ def load(root: str, base: str, warn=None) -> dict:
             cfg[key] = [val]
         elif not isinstance(val, list):
             raise ValueError(f"{CONFIG_FILE}: {key} must be a list, got {val!r}")
-    # normalize marker matching inputs
-    cfg["agent_markers"] = [str(m).lower() for m in cfg["agent_markers"]]
-    cfg["sensitive_paths"] = [str(x) for x in cfg["sensitive_paths"]]
+    # normalize marker matching inputs; the extra_ lists extend, in order,
+    # without repeating an entry
+    # (the extra_ keys stay in the result as given, for the record)
+    cfg["extra_agent_markers"] = [str(m).lower()
+                                  for m in cfg["extra_agent_markers"]]
+    cfg["extra_sensitive_paths"] = [str(x)
+                                    for x in cfg["extra_sensitive_paths"]]
+    markers = [str(m).lower() for m in cfg["agent_markers"]]
+    cfg["agent_markers"] = list(dict.fromkeys(
+        markers + cfg["extra_agent_markers"]))
+    paths = [str(x) for x in cfg["sensitive_paths"]]
+    cfg["sensitive_paths"] = list(dict.fromkeys(
+        paths + cfg["extra_sensitive_paths"]))
+    if not any(str(p).strip() for p in cfg["sensitive_paths"]):
+        # Fail closed, like the markers below: with no glob the sensitive
+        # factor can never score, and an agent rewriting auth.py reads as
+        # one touching a README.
+        raise ValueError(
+            f"{CONFIG_FILE} at {base}: sensitive_paths is empty, so no file "
+            f"could count as sensitive - delete the line to get the defaults "
+            f"back, or list your globs")
+    if not any(markers_mod.effective(m) for m in cfg["agent_markers"]):
+        # Fail closed: with no marker no commit can be an agent's, every
+        # line reads as human and the score can never see agent code. That
+        # is a broken setup, not a clean pull request.
+        raise ValueError(
+            f"{CONFIG_FILE} at {base}: agent_markers is empty, so no commit "
+            f"could be recognised as an agent's - delete the line to get the "
+            f"defaults back, or list your markers")
     cfg["gates"] = [_as_gate(g) for g in cfg["gates"]]
     return cfg
 
@@ -204,9 +237,15 @@ def example_config() -> str:
         "# an entry starting with co-authored-by: only counts in trailers.",
         *_yaml_list("agent_markers", DEFAULTS["agent_markers"]),
         "",
+        "# To ADD markers and keep every default, list them here instead:",
+        *_yaml_list("extra_agent_markers", DEFAULTS["extra_agent_markers"]),
+        "",
         "# Globs for security-sensitive files, matched against the repo-relative",
         "# path and the bare file name, without regard to case.",
         *_yaml_list("sensitive_paths", DEFAULTS["sensitive_paths"]),
+        "",
+        "# To ADD globs and keep every default, list them here instead:",
+        *_yaml_list("extra_sensitive_paths", DEFAULTS["extra_sensitive_paths"]),
         "",
         "# Policy gates: commands run from the repo root, without a shell. A",
         "# failing gate fails the check. None by default; for example:",
