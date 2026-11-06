@@ -14,6 +14,10 @@ with the other three when the score was worked out but the report could not
 be written. A $GITHUB_OUTPUT that cannot be written is a warning, never a
 traceback: the verdict is the exit status, and it stands.
 
+The Markdown report (mdreport.py) is appended to $GITHUB_STEP_SUMMARY, so
+the verdict, the factors and why a gate failed are on the run's summary
+page, not only in the log; a check that could not run says so there too.
+
 Mapping (input -> env var -> CLI flag), kept in INPUTS so the test suite
 can assert action.yml and the CLI agree:
 
@@ -32,6 +36,7 @@ import os
 import sys
 
 from . import cli
+from . import mdreport
 
 #: input name -> (env var, CLI flag, kind). kind: "value" | "flag" | "global".
 INPUTS: dict[str, tuple[str, str, str]] = {
@@ -91,6 +96,27 @@ def write_outputs(values: dict, path: str | None) -> None:
                     f"$GITHUB_OUTPUT ({path}): {e.strerror or e}")
 
 
+def write_summary(text: str, path: str | None) -> None:
+    """Append the Markdown report to $GITHUB_STEP_SUMMARY, the job summary
+    GitHub shows on the run's page (no-op when unset). Like the outputs, a
+    file that cannot be written is one warning, and the verdict stands."""
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(text)
+    except OSError as e:
+        cli._eprint(f"warning: could not write the job summary to "
+                    f"$GITHUB_STEP_SUMMARY ({path}): {e.strerror or e}")
+
+
+def _error_summary(message: str) -> str:
+    return ("## PR Verify: could not run\n\n"
+            f"**❌ error** - "
+            f"{mdreport.code(message, limit=mdreport.MAX_SENTENCE)}\n\n"
+            "Nothing was verified (exit 2).\n")
+
+
 def _status(exc: SystemExit) -> int:
     """The exit status a SystemExit stands for: None is 0, a number is
     itself, anything else (a message) is 1, as in Python."""
@@ -112,12 +138,18 @@ def main(argv: list[str] | None = None, environ: dict | None = None) -> int:
         # the step still sets `exit-code`, as on every other way out
         if _status(e):
             write_outputs({"exit-code": _status(e)}, env.get("GITHUB_OUTPUT"))
+            write_summary(_error_summary(
+                "the inputs were refused or the root is not a git repository "
+                "(the step's log has the error line)"),
+                env.get("GITHUB_STEP_SUMMARY"))
         raise
     try:
         result = cli.run_check(args)
     except cli.CHECK_ERRORS as e:
         cli._eprint(f"error: {cli.error_text(e)}")
         write_outputs({"exit-code": 2}, env.get("GITHUB_OUTPUT"))
+        write_summary(_error_summary(cli.error_text(e)),
+                      env.get("GITHUB_STEP_SUMMARY"))
         return 2
     code = result.code if cli.write_report(result, args.format) else 2
     outputs = {
@@ -127,6 +159,7 @@ def main(argv: list[str] | None = None, environ: dict | None = None) -> int:
         "exit-code": code,
     }
     write_outputs(outputs, env.get("GITHUB_OUTPUT"))
+    write_summary(mdreport.render(result), env.get("GITHUB_STEP_SUMMARY"))
     return code
 
 

@@ -26,7 +26,9 @@ on whole words and only where an agent actually leaves its name:
    "co-authored-by: X" in an old config matches X in trailers only.
    Two other lines Claude Code leaves count as trailers too: its footer
    `Generated with [Claude Code](...)` (the text in the brackets is the
-   name) and the `Claude-Session:` trailer (the key alone names Claude).
+   name) and the `Claude-Session:` trailer (the key alone names Claude);
+   likewise `Agent-Logs-Url:`, which Copilot's coding agent writes into its
+   commits, names Copilot (matched by the marker "copilot").
 4. A marker with an `@` in it is one exact e-mail address, compared
    whole and without case: `noreply@anthropic.com`. That is how Claude
    Code's trailer is caught whatever model name it carries --
@@ -57,7 +59,9 @@ _ADDR_RE = re.compile(r"^(.*?)\s*<([^>]*)>\s*$")
 _FOOTER_RE = re.compile(r"^[^\w\[]*Generated with \[([^\]]+)\]", re.IGNORECASE)
 #: Trailer keys that name an agent by themselves, whatever their value:
 #: key -> the name it stands for. (`Claude-Session: <url>`)
-_AGENT_KEYS = {"claude-session": "Claude"}
+#: Copilot's coding agent writes `Agent-Logs-Url: <link to its session>`
+#: into each of its commits (GitHub changelog, 2026-03-20).
+_AGENT_KEYS = {"claude-session": "Claude", "agent-logs-url": "Copilot"}
 
 
 def _words(text: str) -> list[str]:
@@ -81,6 +85,12 @@ def _split_marker(marker: str) -> tuple[str, bool]:
         if m.startswith(key + ":"):
             return m[len(key) + 1:].strip(), True
     return m, False
+
+
+def effective(marker: str) -> bool:
+    """True when the marker can match something: not blank, and not a bare
+    `co-authored-by:` with nothing after it."""
+    return bool(_marker_words(_split_marker(str(marker))[0]))
 
 
 def name_matches(name: str, marker: str) -> bool:

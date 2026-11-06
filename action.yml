@@ -10,7 +10,7 @@ inputs:
     required: false
     default: HEAD
   format:
-    description: Report format, human or json (same as --format).
+    description: Report format, human, json or markdown (same as --format). The job summary is always Markdown.
     required: false
     default: human
   fail-on:
