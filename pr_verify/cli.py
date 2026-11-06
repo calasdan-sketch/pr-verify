@@ -411,7 +411,7 @@ def _report_human(result: "CheckResult") -> None:
     for g in gate_results:
         mark = "PASS" if g.passed else ("TIMEOUT" if g.timed_out else "FAIL")
         _out(f"    [{mark}] {g.command}")
-        if not g.passed:
+        if not g.passed and not result.hide_gate_output:
             for line in _gate_tail(g.output_tail):
                 _out(f"      | {line}")
     _out()
@@ -453,6 +453,9 @@ class CheckResult:
     base_detected: bool = False
     notes: list = dataclasses.field(default_factory=list)
     nothing: bool = False     # no added/deleted lines in the range
+    #: leave the gates' output out of the human and Markdown reports (the
+    #: JSON keeps it): --hide-gate-output
+    hide_gate_output: bool = False
 
     def nothing_lines(self) -> list[str]:
         """What the human report says when there is nothing to verify: one
@@ -608,7 +611,9 @@ def run_check(args) -> CheckResult:
     return CheckResult(code=code, payload=payload, prov=prov, blast=blast,
                        gates=gate_results, breakdown=breakdown,
                        min_score=min_score, base_detected=base_detected,
-                       notes=notes, nothing=not prov)
+                       notes=notes, nothing=not prov,
+                       hide_gate_output=bool(
+                           getattr(args, "hide_gate_output", False)))
 
 
 def render(result: CheckResult, fmt: str) -> None:
@@ -736,6 +741,12 @@ def build_parser() -> argparse.ArgumentParser:
                         ".pr-verify.yaml (default 70).")
     c.add_argument("--skip-gates", action="store_true",
                    help="Do not run the policy gates from .pr-verify.yaml.")
+    c.add_argument("--hide-gate-output", action="store_true",
+                   help="Leave what a failed gate printed out of the human "
+                        "and Markdown reports (and the Action's job "
+                        "summary); --format json keeps it. A gate runs the "
+                        "PR's code: use this when the report is posted "
+                        "where secrets must not appear, a PR comment."),
     return p
 
 

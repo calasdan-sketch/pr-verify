@@ -27,6 +27,7 @@ can assert action.yml and the CLI agree:
     fail-on     PR_VERIFY_FAIL_ON     --fail-on
     min-score   PR_VERIFY_MIN_SCORE   --min-score   (empty = use config)
     skip-gates  PR_VERIFY_SKIP_GATES  --skip-gates  ('true' = set)
+    hide-gate-output  PR_VERIFY_HIDE_GATE_OUTPUT  --hide-gate-output
     root        PR_VERIFY_ROOT        --root        (global flag)
 """
 
@@ -46,6 +47,8 @@ INPUTS: dict[str, tuple[str, str, str]] = {
     "fail-on": ("PR_VERIFY_FAIL_ON", "--fail-on", "value"),
     "min-score": ("PR_VERIFY_MIN_SCORE", "--min-score", "value"),
     "skip-gates": ("PR_VERIFY_SKIP_GATES", "--skip-gates", "flag"),
+    "hide-gate-output": ("PR_VERIFY_HIDE_GATE_OUTPUT", "--hide-gate-output",
+                         "flag"),
     "root": ("PR_VERIFY_ROOT", "--root", "global"),
 }
 
@@ -159,7 +162,15 @@ def main(argv: list[str] | None = None, environ: dict | None = None) -> int:
         "exit-code": code,
     }
     write_outputs(outputs, env.get("GITHUB_OUTPUT"))
-    write_summary(mdreport.render(result), env.get("GITHUB_STEP_SUMMARY"))
+    if code == 2:
+        # the report could not be written: the step fails with exit 2, and
+        # the summary must not show the pass or fail the log never got
+        write_summary(_error_summary(
+            "the report could not be written to the step's output (exit 2); "
+            "the step's log has the error line"),
+            env.get("GITHUB_STEP_SUMMARY"))
+    else:
+        write_summary(mdreport.render(result), env.get("GITHUB_STEP_SUMMARY"))
     return code
 
 

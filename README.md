@@ -30,7 +30,7 @@ cd your-repo
 pr-verify init            # write .pr-verify.yaml with every default spelled out (commit it to your base branch)
 pr-verify check           # base auto-detected: origin/HEAD, then main, master, origin/main, origin/master
 pr-verify check --base origin/main --format json --min-score 60
-pr-verify check --format markdown > report.md   # for a PR comment: gh pr comment --body-file report.md
+pr-verify check --format markdown --hide-gate-output > report.md   # for a PR comment: gh pr comment --body-file report.md
 ```
 
 `pr-verify init` will not overwrite a `.pr-verify.yaml` that is already there
@@ -324,7 +324,9 @@ and override `sensitive_paths` in your config; `pr-verify init` writes
 every default out, so the file it creates changes nothing until you edit
 it. A list in the config replaces the default list, it does not extend it;
 `extra_sensitive_paths` adds globs and keeps the defaults
-(`extra_sensitive_paths: ["**/billing_v2/**"]`).
+(`extra_sensitive_paths: ["**/billing_v2/**"]`). A config that leaves no
+glob at all (`sensitive_paths: []`) is refused, exit 2 (`sensitive_paths is
+empty`), as an empty marker list is: the sensitive factor could never score.
 
 Bands: 0–29 low · 30–69 medium · 70–100 high — labels only, they never
 decide pass/fail. The formula is documented so teams can argue with it and
@@ -435,6 +437,15 @@ comment <n> --body-file report.md`, or let the Action put it on the run's
 summary page (below). It has the same verdict and numbers as the other
 formats.
 
+**A PR comment is not masked.** A failed gate's output is the PR's own code
+talking, and GitHub masks the secrets it knows of in the step's log, not in
+a comment you post. For a comment, add `--hide-gate-output`: the report then
+lists each gate with PASS/FAIL and its exit status and leaves out what it
+printed (`--format json` keeps it, in `gates[].output_tail`). Whether GitHub
+masks secrets in the job summary is not something this project has been able
+to confirm; set the Action's `hide-gate-output: "true"` if your gates could
+print one.
+
 Every name in it comes from the PR, and Markdown is code: a file called
 `![x](https://tracker.example/p.png).py` would load that image for everyone
 who opens the page, and `[docs](https://...)` would be a link that reads as
@@ -443,13 +454,20 @@ is written inside a code span or a fenced code block whose fence is longer
 than any run of backticks in the text: GitHub shows it literally — no link,
 no image, no HTML, no autolink — and a `|` cannot split a table cell. Control
 and bidi characters are escaped as in the human report. The suite checks this
-with hostile file names, and against a real GFM renderer when `cmarkgfm` is
-installed (optional; the tests do not need it).
+with hostile file names and extensions (`p.![i](https:1572395042)`), and
+renders the report with a real GFM renderer, `cmarkgfm`, when it is
+installed. The package and the suite do not need it; this repo's CI installs
+it on one Ubuntu job and makes that test required there
+(`PR_VERIFY_REQUIRE_GFM=1`), so it is never silently skipped in CI.
 
-The report stays under 60,000 characters: at most 100 files and 8 blast
-radius entries are listed (it says how many it left out), names longer than
-200 characters are shortened in the middle, and at most 5 failed gates show
-their output. `--format json` always has everything.
+The report stays under 60,000 characters. The verdict, the factor table and
+the list of gates with PASS/FAIL are always there; the rest is added an entry
+at a time while it fits: at most 5 failed gates' output (each block at most 30
+lines and 4,000 characters, counted after escaping, which can make one
+character six), 100 file rows and 8 blast radius entries, and each section
+says how many it left out. A PR cannot blank a section by making one entry
+huge. Names longer than 200 characters are shortened in the middle.
+`--format json` always has everything.
 
 ### GitHub Action
 
@@ -468,13 +486,16 @@ default branch is `main`; pin to it (or to a tag once one exists):
     fail-on: high          # --fail-on high|any-risk|never
     min-score: "60"        # --min-score (empty = risk_threshold from config)
     skip-gates: "false"    # --skip-gates
+    hide-gate-output: "false"  # --hide-gate-output (true: no gate output in the log report or job summary)
     root: ""               # --root (empty = the checked-out repo)
 ```
 
 The Action also appends the Markdown report to `$GITHUB_STEP_SUMMARY`, so the
 verdict, the factors and the reason a gate failed are on the run's summary
-page, not only in the log; a check that could not run says so there too. A
-summary file that cannot be written is a warning, and the verdict stands.
+page, not only in the log; a check that could not run says so there too, and
+so does one whose report could not be written to the log (exit 2), never
+with the pass or fail the log did not get. A summary file that cannot be
+written is a warning, and the verdict stands.
 
 Outputs: `score`, `band`, `requires-review`, `exit-code`. `exit-code` is
 always set - 0 pass, 1 fail, 2 when the check could not run (an input the
@@ -586,8 +607,9 @@ compares, so the output below cannot drift from the code:
   it out.
 - A failed gate's last lines are printed in the report (log and job
   summary). A gate runs the PR's code, and what it prints is shown: keep
-  secrets out of gate output (GitHub masks the secrets it knows of in logs;
-  a pull request from a fork gets none).
+  secrets out of gate output, and use `--hide-gate-output` for anything
+  posted as a PR comment (GitHub masks the secrets it knows of in logs, not
+  in comments; a pull request from a fork gets no secrets).
 - The risk formula is a starting point, not a verdict — tune the threshold
   per team.
 

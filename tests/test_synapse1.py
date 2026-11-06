@@ -34,6 +34,18 @@ try:                                    # optional: a real GFM renderer
     from cmarkgfm.cmark import Options as _CmarkOptions
 except ImportError:                     # the suite stays stdlib-only
     cmarkgfm = None
+#: Set in this repo's CI on the job that installs cmarkgfm: there the GFM
+#: tests must run, a missing renderer is a failure and not a skip.
+REQUIRE_GFM = os.environ.get("PR_VERIFY_REQUIRE_GFM") == "1"
+
+
+def render_gfm(test, md):
+    if cmarkgfm is None:
+        if REQUIRE_GFM:
+            test.fail("PR_VERIFY_REQUIRE_GFM=1 but cmarkgfm is not installed")
+        test.skipTest("cmarkgfm not installed (optional)")
+    return cmarkgfm.github_flavored_markdown_to_html(
+        md, options=_CmarkOptions.CMARK_OPT_UNSAFE)
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -81,6 +93,11 @@ HOSTILE_NAMES = [
     "app/` tick.py",
     "app/**bold** _em_ ~~del~~.py",
     "app/www.evil.example.py",
+    # the extension itself is the payload (review finding 1): a dotless
+    # decimal IP needs no . or / -- and the not-scanned note names it
+    "app/p.![i](https:1572395042)",
+    "app/q.[Signed off by security](https:1572395042)",
+    "app/r.<img src=https:1572395042>",
 ]
 
 
@@ -182,8 +199,11 @@ class TestMarkdownReport(unittest.TestCase):
                              "--format", "markdown", "--fail-on", "never")
         self.assertEqual(code, 0, err)
         rest = outside_code(md)
-        for bad in ("](", "<img", "<a ", "**bold**", "~~del~~", "www.evil"):
+        for bad in ("](", "<img", "<a ", "**bold**", "~~del~~", "www.evil",
+                    "https:1572395042"):
             self.assertNotIn(bad, rest)
+        # the not-scanned note is there, with the extension quoted
+        self.assertIn("` .![i](https:1572395042) ` files are not scanned", md)
         # every table row keeps its four cells
         for line in md.splitlines():
             if line.startswith("| agent |"):
@@ -191,13 +211,12 @@ class TestMarkdownReport(unittest.TestCase):
                 self.assertEqual(len(cells), 6, line)
         self.assertNotIn("\n::", md)
 
-    @unittest.skipIf(cmarkgfm is None, "cmarkgfm not installed (optional)")
     def test_hostile_names_render_as_code_in_gfm(self):
         tmp, names = hostile_repo()
         _, md, _ = main("--root", tmp, "check", "--base", "base",
                         "--format", "markdown", "--fail-on", "never")
-        html = cmarkgfm.github_flavored_markdown_to_html(
-            md, options=_CmarkOptions.CMARK_OPT_UNSAFE)
+        html = render_gfm(self, md)
+        self.assertNotIn("1572395042\"", html)      # in no href or src
         self.assertNotIn("<img", html)
         self.assertNotIn("<a ", html)
         self.assertNotIn("<strong>bold", html)
@@ -229,6 +248,95 @@ class TestMarkdownReport(unittest.TestCase):
                            "--format", "markdown")
         self.assertEqual(code, 0)
         self.assertIn("nothing to verify", md)
+
+
+class TestNoSectionCanBeBlanked(unittest.TestCase):
+    """Review finding 2: a PR must not be able to make the report drop the
+    gate list, the files or the blast radius by making one entry huge."""
+
+    def test_gate_output_that_grows_when_escaped(self):
+        flood = gate(PY, "-c", "import sys; sys.stdout.write(chr(0x2028) * "
+                               "1990); sys.exit(1)")
+        tmp, base = with_config(
+            "gates:\n" + "".join(f"  - {yaml_str(flood + ' #' + str(i))}\n"
+                                 for i in range(5)))
+        code, md, err = main("--root", tmp, "check", "--base", base,
+                             "--format", "markdown")
+        self.assertEqual(code, 1, err)
+        self.assertLess(len(md), mdreport.MAX_CHARS)
+        self.assertEqual(md.count("- **FAIL**"), 5)
+        for heading in ("### Policy gates", "### Provenance",
+                        "### Blast radius"):
+            self.assertIn(heading, md)
+        self.assertIn("` app/auth.py `", md)
+        self.assertNotIn("The rest of this report was cut", md)
+        for block in re.findall(r"<details>.*?</details>", md, re.S):
+            self.assertLess(len(block), mdreport.MAX_BLOCK_CHARS + 200)
+
+    def test_file_names_that_grow_when_escaped(self):
+        tmp = tempfile.mkdtemp(prefix="prv-s1-")
+        git(tmp, "init", "-qb", "main")
+        commit_as(tmp, "Dan Calas", "dan@example.com", "base",
+                  {"seed.txt": "x\n"})
+        git(tmp, "branch", "base")
+        files = {f"f{i:03d}" + "`" * 150 + ".md": "y\n" for i in range(150)}
+        commit_as(tmp, "claude-bot", "claude-bot@example.com", "many", files)
+        code, md, err = main("--root", tmp, "check", "--base", "base",
+                             "--format", "markdown", "--skip-gates")
+        self.assertLess(len(md), mdreport.MAX_CHARS, err)
+        self.assertIn("### Blast radius", md)
+        self.assertRegex(md, r"… \d+ more file\(s\) not shown here")
+        # rows that are shown are whole rows
+        rows = [line for line in md.splitlines() if line.startswith("| agent")]
+        self.assertTrue(rows)
+        for row in rows:
+            self.assertTrue(row.endswith("|"), row[-40:])
+
+    def test_fenced_block_is_capped_after_escaping(self):
+        lines = mdreport.fenced("\u2028" * 1990 + "\n" + "`" * 1500)
+        self.assertLess(sum(len(x) + 1 for x in lines),
+                        mdreport.MAX_BLOCK_CHARS + 2 * mdreport.MAX_LINE)
+
+
+class TestHideGateOutput(unittest.TestCase):
+    """Review finding 3: gate output can be left out of what is posted."""
+
+    def repo(self):
+        return with_config("gates:\n  - " + yaml_str(gate(
+            PY, "-c", "print('SECRET' + '_VALUE'); raise SystemExit(5)")) + "\n")
+
+    def test_left_out_of_human_and_markdown_kept_in_json(self):
+        tmp, base = self.repo()
+        for fmt in ("human", "markdown"):
+            with self.subTest(fmt):
+                code, out, _ = main("--root", tmp, "check", "--base", base,
+                                    "--format", fmt, "--hide-gate-output")
+                self.assertEqual(code, 1)
+                self.assertNotIn("SECRET_VALUE", out)
+                self.assertIn("FAIL", out)
+        _, md, _ = main("--root", tmp, "check", "--base", base,
+                        "--format", "markdown", "--hide-gate-output")
+        self.assertIn("(exit 5)", md)
+        self.assertIn("`--hide-gate-output`", md)
+        _, js, _ = main("--root", tmp, "check", "--base", base,
+                        "--format", "json", "--hide-gate-output")
+        self.assertIn("SECRET_VALUE", json.loads(js)["gates"][0]["output_tail"])
+
+    def test_the_action_input_hides_it_from_the_summary(self):
+        tmp, base = self.repo()
+        summary = os.path.join(tempfile.mkdtemp(), "summary.md")
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = action_mod.main(environ={
+                "PR_VERIFY_ROOT": tmp, "PR_VERIFY_BASE": base,
+                "PR_VERIFY_HIDE_GATE_OUTPUT": "true",
+                "GITHUB_STEP_SUMMARY": summary})
+        self.assertEqual(code, 1)
+        with open(summary, encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("**FAIL**", text)
+        self.assertNotIn("SECRET_VALUE", text)
+        self.assertNotIn("SECRET_VALUE", out.getvalue())
 
 
 class TestFailedGateSaysWhy(unittest.TestCase):
@@ -307,6 +415,23 @@ class TestActionJobSummary(unittest.TestCase):
         self.assertEqual(cm.exception.code, 2)
         with open(summary, encoding="utf-8") as f:
             self.assertIn("could not run", f.read())
+
+    def test_a_report_that_cannot_be_written_is_not_a_pass_in_the_summary(self):
+        # review finding 4: exit 2, so the summary must not say pass
+        tmp, base = make_pr_repo()
+        summary = os.path.join(tempfile.mkdtemp(), "summary.md")
+        real = cli_mod.write_report
+        cli_mod.write_report = lambda result, fmt: False
+        try:
+            code, _, _ = self.run_action(self.env(tmp, base, summary))
+        finally:
+            cli_mod.write_report = real
+        self.assertEqual(code, 2)
+        with open(summary, encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("could not run", text)
+        self.assertIn("exit 2", text)
+        self.assertNotIn("✅", text)
 
     def test_an_unwritable_summary_is_a_warning(self):
         tmp, base = make_pr_repo()
@@ -387,6 +512,31 @@ class TestNoMarkersFailsClosed(unittest.TestCase):
                          "agent")
 
 
+class TestNoSensitivePathsFailsClosed(unittest.TestCase):
+    """Review finding 5: like the markers."""
+
+    def test_an_empty_glob_list_is_an_error(self):
+        for text in ("sensitive_paths: []\n", 'sensitive_paths: [" "]\n',
+                     "sensitive_paths:\n"):
+            with self.subTest(text):
+                tmp, base = with_config(text)
+                code, out, err = main("--root", tmp, "check", "--base", base,
+                                      "--format", "json")
+                self.assertEqual(code, 2)
+                self.assertEqual(out, "")
+                self.assertIn("sensitive_paths is empty", err)
+                self.assertEqual(len(err.strip().splitlines()), 1, err)
+
+    def test_extra_globs_alone_are_enough(self):
+        tmp, base = with_config('sensitive_paths: []\n'
+                                'extra_sensitive_paths: ["**/auth.*"]\n')
+        code, out, err = main("--root", tmp, "check", "--base", base,
+                              "--format", "json", "--skip-gates")
+        self.assertIn(code, (0, 1), err)
+        self.assertEqual(
+            json.loads(out)["risk"]["factors"]["sensitive"]["points"], 20)
+
+
 class TestCopilotAgentTrailer(unittest.TestCase):
     MARKERS = config_mod.DEFAULTS["agent_markers"]
 
@@ -426,6 +576,11 @@ class TestDocs(unittest.TestCase):
                      "Agent-Logs-Url"):
             self.assertIn(text, readme)
         self.assertIn(f"## {cli_mod.VERSION}", self.read("CHANGELOG.md"))
+
+    def test_ci_runs_the_gfm_tests_somewhere(self):
+        ci = self.read(".github/workflows/ci.yml")
+        self.assertIn('pip install "cmarkgfm==', ci)
+        self.assertIn("PR_VERIFY_REQUIRE_GFM:", ci)
 
     def test_versions_agree(self):
         pyproject = self.read("pyproject.toml")

@@ -44,9 +44,14 @@ MAX_FILES = 100
 MAX_BLAST = 8
 #: A name longer than this is shortened in the middle.
 MAX_NAME = 200
-#: Lines of a failed gate's output that are shown, and for how many gates.
+#: Lines of a failed gate's output that are shown, and for how many gates;
+#: the characters one block may take and one line of it, counted after the
+#: escapes; and the notes shown.
 MAX_GATE_LINES = 30
 MAX_GATE_OUTPUTS = 5
+MAX_BLOCK_CHARS = 4000
+MAX_LINE = 400
+MAX_NOTES = 10
 
 _BACKTICKS = re.compile(r"`+")
 
@@ -88,38 +93,55 @@ def code(text, table: bool = False, limit: int = MAX_NAME) -> str:
     return f"{fence} {body} {fence}"
 
 
-def fenced(text: str, max_lines: int = MAX_GATE_LINES) -> list[str]:
-    """Lines of a fenced code block holding text (its last max_lines
-    lines). The fence is longer than any run of backticks in the text, so no
-    line of it can close the block; a ~~~ line cannot either, a block opened
-    with backticks is only closed by backticks."""
+def fenced(text: str, max_lines: int = MAX_GATE_LINES,
+           max_chars: int = MAX_BLOCK_CHARS) -> list[str]:
+    """Lines of a fenced code block holding the end of text. The limits are
+    applied AFTER escaping (an escape is up to six characters for one, so a
+    limit counted before it could be outgrown sixfold): each line is at
+    most MAX_LINE characters, and the block keeps the last lines that fit in
+    max_lines and max_chars. The fence is longer than any run of backticks
+    in what is kept, so no line of it can close the block; a ~~~ line cannot
+    either, a block opened with backticks is only closed by backticks."""
     # \r\n (a gate on Windows) is one line end, not a \x0d on every line
-    lines = [_plain(line.rstrip("\r")).rstrip()
+    lines = [_shorten(_plain(line.rstrip("\r")).rstrip(), MAX_LINE)
              for line in str(text).split("\n")]
     while lines and not lines[-1]:
         lines.pop()
-    if len(lines) > max_lines:
-        lines = [f"… ({len(lines) - max_lines} earlier line(s) not shown)"] \
-            + lines[-max_lines:]
-    longest = max((len(m) for line in lines
+    kept: list[str] = []
+    used = 0
+    for line in reversed(lines):
+        if len(kept) >= max_lines or used + len(line) + 1 > max_chars:
+            break
+        kept.append(line)
+        used += len(line) + 1
+    kept.reverse()
+    if len(kept) < len(lines):
+        kept.insert(0, f"… ({len(lines) - len(kept)} earlier line(s) not "
+                       f"shown)")
+    longest = max((len(m) for line in kept
                    for m in _BACKTICKS.findall(line)), default=0)
     fence = "`" * max(3, longest + 1)
-    return [fence + "text", *lines, fence]
+    return [fence + "text", *kept, fence]
 
 
-def blast_note(b) -> str:
+def blast_note(b, quote=lambda text: text) -> str:
     """Why a changed file shows no dependents when the scan could not see
-    it, or "" (shared with the human report)."""
+    it, or "" (shared with the human report). The one part of it that comes
+    from the PR, a file's extension, goes through quote: the Markdown report
+    passes code(), as `p.![i](https:1572395042)` has the extension
+    `.![i](https:1572395042)`, an image in Markdown."""
     if not b.external_only:
         return ""
     if b.scan == "not_source":
         ext = os.path.splitext(b.file)[1].lower()
-        what = f"{ext} files are" if ext else "this file type is"
+        what = f"{quote(ext)} files are" if ext else "this file type is"
         return f"{what} not scanned for imports"
     if b.scan == "not_in_worktree":
         why = "not in the worktree"
     elif b.scan == "skipped_dir":
-        why = f"in {br_mod.skipped_dir(b.file)}/, which the import scan skips"
+        # one of blastradius.SKIP_DIRS, a fixed name; quoted all the same
+        why = (f"in {quote(br_mod.skipped_dir(b.file) + '/')}, which the "
+               f"import scan skips")
     else:
         why = "not reached by the import scan"
     return f"{why}; nothing in-repo imports it"
@@ -152,7 +174,7 @@ def _header(result) -> list[str]:
              f"Base {base}" + (f" · merge-base {code(fork[:12])}" if fork
                                else "")
              + f" · head {code(result.payload['head'])}"]
-    for note in result.notes:
+    for note in result.notes[:MAX_NOTES]:
         lines += ["", f"> **note:** {code(note, limit=MAX_SENTENCE)}"]
     return lines
 
@@ -166,24 +188,41 @@ def _factors(result) -> list[str]:
     return lines
 
 
-def _files(result) -> list[str]:
+def _gate_list(result) -> list[str]:
+    lines = ["", "### Policy gates", ""]
+    if not result.gates:
+        lines.append("None configured.")
+    for g in result.gates:
+        mark = "PASS" if g.passed else ("TIMEOUT" if g.timed_out else "FAIL")
+        lines.append(f"- **{mark}** {code(g.command)} (exit "
+                     f"{int(g.returncode)})")
+    return lines
+
+
+def _gate_outputs(result) -> list[list[str]]:
+    """One collapsed block per failed gate (none when gate output is to be
+    left out of the report)."""
+    if getattr(result, "hide_gate_output", False):
+        return []
+    blocks = []
+    failed = [(i, g) for i, g in enumerate(result.gates, 1) if not g.passed]
+    for i, g in failed:
+        blocks.append(["", f"<details><summary>Output of gate {i} (exit "
+                           f"{int(g.returncode)})</summary>", "",
+                       *fenced(g.output_tail or "(no output)"),
+                       "", "</details>"])
+    return blocks
+
+
+def _file_rows(result) -> list[list[str]]:
+    rows = []
     prov = result.prov
-    total_added = sum(f.added for f in prov.values())
-    agent_added = sum(f.agent_added for f in prov.values())
-    total_removed = sum(f.removed for f in prov.values())
-    agent_removed = sum(f.agent_removed for f in prov.values())
-    summary = f"{agent_added}/{total_added} added lines agent-authored"
-    if total_removed:
-        summary += f"; {agent_removed}/{total_removed} removed lines"
-    lines = ["", "### Provenance", "", summary, "",
-             "| | File | Agent lines | Agents |", "|---|---|---|---|"]
-    names = sorted(prov)
-    for rel in names[:MAX_FILES]:
+    for rel in sorted(prov):
         f = prov[rel]
         if f.deleted:
             who = ", ".join(f.deleted_by) or "unknown"
-            lines.append(f"| deleted | {code(rel, True)} | - | "
-                         f"{code(who, True)} |")
+            rows.append([f"| deleted | {code(rel, True)} | - | "
+                         f"{code(who, True)} |"])
             continue
         if not (f.added or f.removed):
             continue
@@ -192,55 +231,57 @@ def _files(result) -> list[str]:
             gone = f"{f.agent_removed}/{f.removed} removed"
             counts = f"{counts}, {gone}" if counts else gone
         who = ", ".join(sorted(f.agents)) if f.agents else "human"
-        lines.append(f"| {f.label()} | {code(rel, True)} | {counts} | "
-                     f"{code(who, True)} |")
-    if len(names) > MAX_FILES:
-        lines += ["", f"… and {len(names) - MAX_FILES} more file(s): "
-                      f"`--format json` lists all of them."]
-    return lines
+        rows.append([f"| {f.label()} | {code(rel, True)} | {counts} | "
+                     f"{code(who, True)} |"])
+    return rows
 
 
-def _blast(result) -> list[str]:
-    lines = ["", "### Blast radius", ""]
+def _files_head(result) -> list[str]:
+    prov = result.prov
+    total_added = sum(f.added for f in prov.values())
+    agent_added = sum(f.agent_added for f in prov.values())
+    total_removed = sum(f.removed for f in prov.values())
+    agent_removed = sum(f.agent_removed for f in prov.values())
+    summary = f"{agent_added}/{total_added} added lines agent-authored"
+    if total_removed:
+        summary += f"; {agent_removed}/{total_removed} removed lines"
+    return ["", "### Provenance", "", summary, "",
+            "| | File | Agent lines | Agents |", "|---|---|---|---|"]
+
+
+def _blast_entries(result) -> list[list[str]]:
+    entries = []
     ranked = sorted(result.blast.values(), key=lambda b: b.size,
-                    reverse=True)[:MAX_BLAST]
-    if not ranked:
-        lines.append("No files changed.")
+                    reverse=True)
     for b in ranked:
-        note = blast_note(b)
+        note = blast_note(b, quote=code)
         line = f"- {code(b.file)}: {b.size} downstream dependent(s)"
         if note:
             line += f" ({note})"
-        lines.append(line)
+        entry = [line]
         if b.direct:
             shown = ", ".join(code(d) for d in b.direct[:5])
             more = f" and {len(b.direct) - 5} more" if len(b.direct) > 5 else ""
-            lines.append(f"  - direct: {shown}{more}")
-    return lines
+            entry.append(f"  - direct: {shown}{more}")
+        entries.append(entry)
+    return entries
 
 
-def _gates(result) -> list[str]:
-    lines = ["", "### Policy gates", ""]
-    if not result.gates:
-        lines.append("None configured.")
-        return lines
-    for g in result.gates:
-        mark = "PASS" if g.passed else ("TIMEOUT" if g.timed_out else "FAIL")
-        lines.append(f"- **{mark}** {code(g.command)}")
-    failed = [(i, g) for i, g in enumerate(result.gates, 1) if not g.passed]
-    for i, g in failed[:MAX_GATE_OUTPUTS]:
-        lines += ["", f"<details><summary>Output of gate {i} (exit "
-                      f"{int(g.returncode)})</summary>", ""]
-        lines += fenced(g.output_tail or "(no output)")
-        lines += ["", "</details>"]
-    if len(failed) > MAX_GATE_OUTPUTS:
-        lines += ["", f"The output of {len(failed) - MAX_GATE_OUTPUTS} more "
-                      f"failed gate(s) is in `--format json`."]
-    return lines
+def _size(lines: list[str]) -> int:
+    return sum(len(line) + 1 for line in lines)
 
 
 def render(result) -> str:
-    """The whole report, a string that ends with a newline."""
+    """The whole report, a string that ends with a newline, never longer
+    than MAX_CHARS.
+
+    The header, the factor table and the list of gates with their verdicts
+    are always there (each is small whatever the PR holds: names are
+    shortened after they are escaped, notes and gates are few and come from
+    this tool and the base's config). The rest -- the gates' output, the
+    file rows, the blast radius entries -- is added an entry at a time while
+    it fits, and each section says how many of its entries it left out, so
+    a PR cannot make the report drop a section by making one entry huge."""
     from . import cli    # the version, without an import cycle at load time
     footer = ["", "---", f"<sub>pr-verify {cli.VERSION}: deterministic, no "
                          f"LLM. `--format json` has every number.</sub>"]
@@ -249,17 +290,34 @@ def render(result) -> str:
             "", f"No added or removed lines between {code(result.payload['base'])}"
                 f" and {code(result.payload['head'])}: nothing to verify."]
         return "\n".join(body + footer) + "\n"
-    out: list[str] = []
-    size = 0
-    budget = MAX_CHARS - 400      # room for the footer and the cut notice
-    for section in (_header, _factors, _gates, _files, _blast):
-        lines = section(result)
-        chunk = sum(len(line) + 1 for line in lines)
-        if size + chunk > budget:
-            out += ["", "_The rest of this report was cut to stay under "
-                        f"{MAX_CHARS:,} characters: `--format json` has "
-                        "all of it._"]
-            break
-        out += lines
-        size += chunk
+    out = _header(result) + _factors(result) + _gate_list(result)
+    # room for the footer and for one "left out" line per section
+    budget = MAX_CHARS - _size(footer) - 3 * 200
+
+    def add(entries, limit, what):
+        nonlocal out
+        shown = 0
+        for entry in entries[:limit]:
+            if _size(out) + _size(entry) > budget:
+                break
+            out += entry
+            shown += 1
+        left = len(entries) - shown
+        if left:
+            out += ["", f"… {left} more {what} not shown here: "
+                        f"`--format json` has all of them."]
+
+    if getattr(result, "hide_gate_output", False):
+        if any(not g.passed for g in result.gates):
+            out += ["", "Gate output is left out of this report "
+                        "(`--hide-gate-output`)."]
+    else:
+        add(_gate_outputs(result), MAX_GATE_OUTPUTS, "failed gate output(s)")
+    out += _files_head(result)
+    add(_file_rows(result), MAX_FILES, "file(s)")
+    out += ["", "### Blast radius", ""]
+    entries = _blast_entries(result)
+    if not entries:
+        out.append("No files changed.")
+    add(entries, MAX_BLAST, "blast radius entr(ies)")
     return "\n".join(out + footer) + "\n"

@@ -1067,7 +1067,7 @@ class TestUnknownSettings(unittest.TestCase):
 
     def test_a_file_with_only_known_settings_says_nothing(self):
         for text in (config_mod.example_config(),
-                     "agent_markers: [claude]\nsensitive_paths: []\n"
+                     "agent_markers: [claude]\nsensitive_paths: [x]\n"
                      "gates: []\nrisk_threshold: 60\ntimeout: 30\n",
                      ""):
             with self.subTest(text=text[:30]):

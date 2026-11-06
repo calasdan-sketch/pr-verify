@@ -2,6 +2,26 @@
 
 ## 0.2.0 (unreleased)
 
+Review fixes (panel review of the first 0.2.0 commit)
+
+- Markdown: a file's extension in the "not scanned for imports" note was
+  written as Markdown, so `p.![i](https:1572395042)` rendered an image and
+  `q.[text](...)` a link. It is in a code span now, like every other name.
+- Markdown: the size limit could drop whole sections (one huge gate output
+  of U+2028, which grows sixfold when escaped, left only the header). Gate
+  blocks are now capped after escaping (30 lines, 4,000 characters), the
+  gate list with PASS/FAIL and exit status is always there, and files and
+  blast radius are cut row by row, saying how many were left out.
+- `--hide-gate-output` (Action input `hide-gate-output`) leaves what failed
+  gates printed out of the human and Markdown reports and the job summary;
+  `--format json` keeps it. The README now says a PR comment is not masked.
+- The job summary no longer shows pass or fail when the report could not be
+  written (exit 2): it says the check could not deliver its report.
+- `sensitive_paths: []` (with no `extra_sensitive_paths`) is refused, exit 2,
+  as empty markers are.
+- CI installs `cmarkgfm` on one Ubuntu job and requires the GFM rendering
+  test there (`PR_VERIFY_REQUIRE_GFM=1`), so it is never silently skipped.
+
 Added
 
 - `check --format markdown`: the report as GitHub-flavoured Markdown, for a
@@ -29,6 +49,8 @@ Changed
   marker is refused, exit 2 (`agent_markers is empty`). It used to run and
   score every line as human. To keep only your own markers, list them.
 - The `format` input of the Action takes `markdown` too.
+- `sensitive_paths` that leaves no glob is refused, exit 2
+  (`sensitive_paths is empty`). It used to switch the sensitive factor off.
 
 ## 0.1.3
 

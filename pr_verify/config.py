@@ -192,6 +192,14 @@ def load(root: str, base: str, warn=None) -> dict:
     paths = [str(x) for x in cfg["sensitive_paths"]]
     cfg["sensitive_paths"] = list(dict.fromkeys(
         paths + cfg["extra_sensitive_paths"]))
+    if not any(str(p).strip() for p in cfg["sensitive_paths"]):
+        # Fail closed, like the markers below: with no glob the sensitive
+        # factor can never score, and an agent rewriting auth.py reads as
+        # one touching a README.
+        raise ValueError(
+            f"{CONFIG_FILE} at {base}: sensitive_paths is empty, so no file "
+            f"could count as sensitive - delete the line to get the defaults "
+            f"back, or list your globs")
     if not any(markers_mod.effective(m) for m in cfg["agent_markers"]):
         # Fail closed: with no marker no commit can be an agent's, every
         # line reads as human and the score can never see agent code. That
