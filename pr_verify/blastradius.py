@@ -48,6 +48,7 @@ link to /dev/zero named evil.py, and a worktree can hold a named pipe.
 from __future__ import annotations
 
 import ast
+import collections
 import dataclasses
 import os
 import posixpath
@@ -119,6 +120,24 @@ def _package_of(rel: str) -> list[str]:
     return parts[:-1]
 
 
+_BODY_FIELDS = ("body", "orelse", "finalbody", "handlers", "cases")
+
+
+def _statements(tree):
+    """Every statement node of a module, nested ones included, without
+    visiting the expressions inside them: an import is a statement, and
+    `ast.walk` over a 3,000-file repository spent most of its time in
+    expression nodes (about 3x slower on the same files, same result)."""
+    queue = collections.deque([tree])      # breadth first, as ast.walk
+    while queue:
+        node = queue.popleft()
+        yield node
+        for field in _BODY_FIELDS:
+            kids = getattr(node, field, None)
+            if kids:
+                queue.extend(kids)
+
+
 def _python_imports(rel: str, content: str) -> list[str]:
     """Dotted names a Python file may depend on (absolute form)."""
     try:
@@ -129,7 +148,7 @@ def _python_imports(rel: str, content: str) -> list[str]:
         return []
     pkg = _package_of(rel)
     mods: list[str] = []
-    for node in ast.walk(tree):
+    for node in _statements(tree):
         if isinstance(node, ast.Import):
             mods.extend(a.name for a in node.names)
         elif isinstance(node, ast.ImportFrom):

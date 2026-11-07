@@ -112,6 +112,10 @@ _INJECTION = [
                 r"(this|these|the|any)\b[^.\n]{0,40}\b(issue|vulnerabilit|finding|problem|change|warning)",
                 re.I),
      "tells the reviewer not to report"),
+    (re.compile(_B + r"(ai|llm|bot|assistant|reviewer|copilot)(\s+reviewer)?[,:]\s*"
+                r"(this|the)\s+(pr|pull\s*request|change|code|diff)\s+(is|looks)\s+"
+                r"(safe|secure|fine|ok|okay|clean|approved|harmless)", re.I),
+     "tells the reviewer the change is safe"),
     (re.compile(_B + r"(approve|lgtm|mark|label|rate|treat)\s+(this|the)\s+"
                 r"(pr|pull\s*request|change|diff|code|commit)\b[^.\n]{0,30}"
                 r"\b(as\s+)?(safe|secure|approved|lgtm|trusted|low[\s-]*risk|reviewed)", re.I),

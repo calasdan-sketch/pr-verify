@@ -75,6 +75,7 @@ authorship to analyze.
 
 from __future__ import annotations
 
+import concurrent.futures
 import contextlib
 import dataclasses
 import os
@@ -575,6 +576,18 @@ def _parse_blame(out: str) -> tuple[dict[int, str], set[str]]:
 #: gets the credit (or the blame) for lines they did not write.
 BLAME_DETECT = ("-w", "-M", "-C")
 
+#: `git blame` processes running at once (files are independent). 1 turns
+#: the parallelism off; set PR_VERIFY_WORKERS to change it.
+def _workers() -> int:
+    try:
+        n = int(os.environ.get("PR_VERIFY_WORKERS", ""))
+    except ValueError:
+        n = min(4, os.cpu_count() or 1)
+    return max(1, min(n, 32))
+
+
+BLAME_WORKERS = _workers()
+
 
 def _blame_authors(root: str, head: str, rel: str,
                    options: list[str] | tuple = (),
@@ -701,13 +714,32 @@ def analyze(root: str, base: str, head: str = "HEAD",
     del_shas: dict[str, list[str]] = {}
     all_shas: set[str] = set()
     blame_options = _blame_options(root) if added or removed else []
-    for rel in added:
+    def blame_one(rel: str) -> dict[int, str]:
         try:
-            bm = _blame_authors(root, head, rel, blame_options, detect_moves)
+            return _blame_authors(root, head, rel, blame_options, detect_moves)
         except RuntimeError:
             if not _is_gitlink(root, head, rel):
                 raise
-            bm = _pointer_authors(root, base, head, rel, added[rel])
+            return _pointer_authors(root, base, head, rel, added[rel])
+
+    # one `git blame` per file, a few at a time: each is a separate process
+    # reading the same objects, so the answers do not depend on the order
+    # (results are collected by file name, errors raised in file order)
+    names = sorted(added)
+    if len(names) > 1 and BLAME_WORKERS > 1:
+        with concurrent.futures.ThreadPoolExecutor(BLAME_WORKERS) as pool:
+            futures = [pool.submit(blame_one, rel) for rel in names]
+            results = []
+            for fut in futures:
+                try:
+                    results.append(fut.result())
+                except BaseException:
+                    for other in futures:
+                        other.cancel()
+                    raise
+    else:
+        results = [blame_one(rel) for rel in names]
+    for rel, bm in zip(names, results):
         blame_maps[rel] = bm
         all_shas.update(bm[ln] for ln in added[rel] if ln in bm)
     for rel in deleted:

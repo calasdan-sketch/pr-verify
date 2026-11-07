@@ -2,6 +2,32 @@
 
 ## 0.3.0 (unreleased)
 
+Expert round 3: attacking the scanner. Panel: a hostile PR author, a
+performance engineer, a code-scanning (SARIF) consumer, an engineering
+manager using only the README, a docs/DX lead, a competitor's engineer.
+
+Fixed (found by attacking the scan)
+
+- A line longer than 4,000 characters hid everything after the 4,000th: it is
+  now searched in overlapping windows. More than 20,000 added lines in a file
+  hid the rest: the limit is 100,000 per file and 500,000 per run, and
+  anything past a limit is a `scan_limit` finding instead of silence.
+- The per-file and per-run caps on findings kept the first ones in scan order,
+  so 40 harmless findings pushed a secret out of the report and the score
+  (score 8 instead of 23 in the test). They keep the most severe now.
+- Extensionless scripts (`bin/x`, `scripts/x`), `Makefile`, `Rakefile`,
+  `.pyw`, `.phtml`, `.bat`, `.ex` and other extensions were not searched as
+  code.
+
+Added
+
+- Rules: SQL built from a string, PHP `system($var)`, `__import__(..).system`,
+  `getattr(os, "system")`, "AI reviewer: this code is safe".
+- `scan_limit` class; `pr-verify rules`.
+- SARIF: rule-level `security-severity` and `security` tag, `partialFingerprints`.
+- Parallel `git blame` (`PR_VERIFY_WORKERS`), statement-only import walk.
+- Corpus 134 -> 151 diffs (all matched exactly); `tests/test_round3b.py`.
+
 Expert round 2: from "which lines" to "what they can break and where to look".
 
 Added

@@ -296,6 +296,21 @@ def detect_base(root: str) -> str | None:
     return None
 
 
+def cmd_rules(args) -> int:
+    """List the risk classes: the names `deny_classes`, `risk_class_off` and
+    SARIF use, with their severities in points. Needs no repository."""
+    from . import riskclass, sarif
+    with _stdout_may_close():
+        _out(f"{'class':<22}title")
+        for name in riskclass.CLASSES:
+            _out(f"{name:<22}{sarif.RULES.get(name, name)}")
+        pts = ", ".join(f"{k} {v}" for k, v in riskclass.SEVERITY_POINTS.items())
+        _out()
+        _out(f"points per class at its highest severity: {pts}; "
+             f"the factor is capped at {riskclass.MAX_POINTS}.")
+    return 0
+
+
 def cmd_init(args) -> int:
     _ensure_git()       # before anything is written: no file, then no error
     # The config is read from the base ref's top level, so that is where it
@@ -834,6 +849,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "(without it init leaves the file alone and exits "
                         "2).")
 
+    sub.add_parser("rules", help="List the risk classes and their points.")
+
     c = sub.add_parser("check", help="Verify a diff range.")
     c.add_argument("--base", default=None,
                    help="Base ref (default: auto-detect — origin/HEAD, then "
@@ -889,7 +906,7 @@ def main(argv=None) -> int:
         # write, so a closed pipe would only show at the flush on the way out.
         with _stdout_may_close():
             args = build_parser().parse_args(argv)
-        return {"init": cmd_init, "check": cmd_check}[args.cmd](args)
+        return {"init": cmd_init, "check": cmd_check, "rules": cmd_rules}[args.cmd](args)
     except OSError as e:
         # What the commands did not take care of themselves: a file or a
         # stream the operating system refused (a full disk behind `> file`).

@@ -8,6 +8,7 @@ direction characters shown as escapes).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import urllib.parse
 
@@ -33,6 +34,7 @@ RULES = {
     "iac": "Infrastructure definition changed",
     "guard_removed": "Authorization or validation call removed",
     "test_weakening": "Tests skipped, removed or made trivial",
+    "scan_limit": "Part of the change could not be searched",
 }
 
 
@@ -46,10 +48,23 @@ def build(version: str, findings: list, violations: list, agent_lines: dict | No
     seen: set[str] = set()
     results = []
 
+    top: dict[str, str] = {}      # rule -> highest severity among its findings
+    order = ("critical", "high", "medium", "low")
+    for fd in findings:
+        if fd.cls not in top or order.index(fd.severity) < order.index(top[fd.cls]):
+            top[fd.cls] = fd.severity
+    nth: dict[tuple, int] = {}
+
     def rule(rid: str, text: str):
         if rid not in seen:
             seen.add(rid)
-            rules.append({"id": rid, "shortDescription": {"text": text}})
+            r = {"id": rid, "shortDescription": {"text": text}}
+            if rid in top:
+                # GitHub reads the security level and the "security" tag from
+                # the rule, not from the result
+                r["properties"] = {"tags": ["security"],
+                                   "security-severity": SCORE.get(top[rid], "5.0")}
+            rules.append(r)
 
     for fd in findings:
         rule(fd.cls, RULES.get(fd.cls, fd.cls))
@@ -64,6 +79,12 @@ def build(version: str, findings: list, violations: list, agent_lines: dict | No
                 "artifactLocation": {"uri": _uri(fd.file)},
                 "region": {"startLine": max(1, fd.line)}}}],
         }
+        key = (fd.cls, fd.file, fd.why)
+        k = nth[key] = nth.get(key, 0) + 1
+        # stable across line shifts: rule, file, reason and which of its kind
+        res["partialFingerprints"] = {"prVerify/v1": hashlib.sha256(
+            "\x00".join((fd.cls, fd.file, fd.why, str(k))).encode("utf-8", "replace")
+        ).hexdigest()[:32]}
         results.append(res)
     for v in violations:
         rid = "policy/" + v.rule

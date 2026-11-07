@@ -29,6 +29,8 @@ counts once at its highest severity, all classes together capped at 25):
   iac                 infrastructure files
   guard_removed       an auth/validation call that the diff takes out
   test_weakening      skipped tests, removed assertions, `|| true` in CI
+  scan_limit          the scan could not search everything (a line padded
+                      past 4,000 characters, a file past 100,000 added lines)
 
 What it cannot see: anything that is not in the added or removed lines
 (a one-line change that is dangerous only because of the code around it), and
@@ -53,13 +55,24 @@ MAX_PER_FILE = 40
 MAX_TOTAL = 400
 #: lines of one file searched; a lockfile of 50,000 lines is searched for
 #: sources, not line by line for everything
-MAX_LINES_PER_FILE = 20000
+MAX_LINES_PER_FILE = 100000
+#: added lines searched in one run; the rest of a very large pull request is
+#: reported as `scan_limit`, so the scan stays near ten seconds.
+MAX_LINES_TOTAL = 500000
 MAX_LINE_CHARS = 4000
+#: a longer line is searched in windows of MAX_LINE_CHARS that overlap by
+#: WINDOW_OVERLAP (a pattern cut by a window edge is whole in the next), up
+#: to MAX_WINDOWS_PER_LINE windows, and MAX_WINDOWS_PER_FILE in a file; what
+#: is past that is reported as a `scan_limit` finding, never skipped quietly.
+WINDOW_OVERLAP = 200
+MAX_WINDOWS_PER_LINE = 64
+MAX_WINDOWS_PER_FILE = 4000
 
 CLASSES = ("hidden_text", "prompt_injection", "secret", "ci_workflow",
            "dependency", "install_script", "remote_script", "unsafe_exec",
            "weak_control", "weak_crypto", "permissions",
-           "destructive_migration", "iac", "guard_removed", "test_weakening")
+           "destructive_migration", "iac", "guard_removed", "test_weakening",
+           "scan_limit")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -121,7 +134,11 @@ _TEST = re.compile(
 _DOC = re.compile(r"\.(md|markdown|rst|txt|adoc)$|(^|/)(docs?|documentation)/", re.I)
 _CODE = re.compile(
     r"\.(py|js|jsx|ts|tsx|mjs|cjs|rb|php|java|kt|scala|go|rs|c|cc|cpp|h|hpp|cs|"
-    r"swift|sh|bash|zsh|ps1|pl|lua|groovy|gradle|vue|svelte)$", re.I)
+    r"swift|sh|bash|zsh|ksh|fish|ps1|psm1|pl|pm|lua|groovy|gradle|vue|svelte|"
+    r"pyw|phtml|php\d|inc|ex|exs|erl|dart|bat|cmd|mk|jl|r)$|"
+    # extensionless scripts and build files: a payload goes where nobody looks
+    r"(^|/)(Makefile|GNUmakefile|Rakefile|Fastfile|Podfile|Brewfile|Procfile|"
+    r"Justfile|Taskfile)$|(^|/)(bin|sbin|scripts?|libexec|hooks)/[^/.]+$", re.I)
 
 
 # --- line rules ----------------------------------------------------------------
@@ -157,6 +174,14 @@ _CODE_RULES = [
     ("unsafe_exec", "high", "shell command from a string",
      _rx(r"\bos\.(system|popen)\s*\(|\bshell_exec\s*\(|\bpassthru\s*\(|"
          r"\bRuntime\.getRuntime\(\)\.exec\(|\bexec\.Command\(\s*\"(sh|bash|cmd)\"")),
+    ("unsafe_exec", "high", "SQL built from a string",
+     _rx(r"\b(execute|executemany|raw|query|prepare)\s*\(\s*(?:f[\"'][^\"']*\b(select|insert|update|delete)\b[^\"']*\{|"
+         r"[^)]{0,200}?\b(select|insert|update|delete)\b[^)]{0,200}?"
+         r"(?:[\"'`]\s*\+\s*[\w(]|\$\{|\.format\(|[\"']\s*%\s*[\w(]))", re.I)),
+    ("unsafe_exec", "high", "shell command from a string",
+     _rx(r"(?<![\w.>:$])(system|passthru|popen|proc_open)\s*\(\s*\$\w|"
+         r"__import__\s*\([^)]*\)\s*\.\s*(system|popen)\b|"
+         r"\bgetattr\s*\(\s*os\s*,\s*[\"'](system|popen)[\"']")),
     ("unsafe_exec", "high", "subprocess with shell=True",
      _rx(r"\bsubprocess\.\w+\([^)]*shell\s*=\s*True|\bshell\s*=\s*True\b")),
     ("unsafe_exec", "high", "child_process exec of a string",
@@ -333,7 +358,7 @@ _GENERIC_SECRET = _rx(
 _Q_CODE = _Quick(["eval", "exec", "function", "system", "popen", "passthru", "shell",
                   "pickle", "marshal", "unserialize", "objectinput", "yaml",
                   "binaryformatter", "innerhtml", "dangerously", "document.write",
-                  "safe", "v-html", "child_process"])
+                  "safe", "v-html", "child_process", "query", "raw", "prepare", "proc_open", "__import__", "getattr"])
 _Q_WEAK = _Quick(["verif", "unauthorized", "insecure", "cert_none", "check_hostname",
                   "unverified", "tls_reject", "ssl", "trustall", "algorithm", "alg",
                   "expiration", "csrf", "forgery", "allowed_hosts", "origin", "cors",
@@ -369,23 +394,70 @@ def _is_comment(line: str) -> bool:
 # --- the scan ------------------------------------------------------------------
 
 class _Out:
+    """Collects every finding, then keeps the most severe ones within the
+    caps. (Capping in scan order let a file of 40 harmless findings push a
+    secret on line 100 out of the report and the score.)"""
+
     def __init__(self):
         self.items: list[Finding] = []
-        self.per_file: dict[str, int] = {}
         self.dropped = 0
         self.seen: set[tuple] = set()
+        self.budget = MAX_LINES_TOTAL
 
     def add(self, cls, sev, file, line, why):
         key = (cls, file, line, why)
         if key in self.seen:
             return
         self.seen.add(key)
-        if (self.per_file.get(file, 0) >= MAX_PER_FILE
-                or len(self.items) >= MAX_TOTAL):
-            self.dropped += 1
-            return
-        self.per_file[file] = self.per_file.get(file, 0) + 1
         self.items.append(Finding(cls, sev, file, line, why))
+
+    def capped(self) -> list[Finding]:
+        rank = lambda f: (SEVERITY_ORDER.index(f.severity), f.file, f.line, f.cls)  # noqa: E731
+        per: dict[str, int] = {}
+        kept: list[Finding] = []
+        for f in sorted(self.items, key=rank):
+            if per.get(f.file, 0) >= MAX_PER_FILE or len(kept) >= MAX_TOTAL:
+                self.dropped += 1
+                continue
+            per[f.file] = per.get(f.file, 0) + 1
+            kept.append(f)
+        return kept
+
+
+def _units(lines: dict[int, str], out: "_Out", rel: str, on_limit: bool):
+    """(line number, text to search, first window of that line) for each
+    added line, long lines as overlapping windows. Past the limits, a
+    `scan_limit` finding says how much was not searched."""
+    windows = 0
+    skipped_lines = 0
+    cut_line = 0
+    step = MAX_LINE_CHARS - WINDOW_OVERLAP
+    allowed = min(MAX_LINES_PER_FILE, out.budget)
+    out.budget -= min(allowed, len(lines))
+    for count, n in enumerate(sorted(lines), 1):
+        if count > allowed:
+            skipped_lines = len(lines) - allowed
+            break
+        t = lines[n]
+        if len(t) <= MAX_LINE_CHARS:
+            yield n, t, t
+            continue
+        first = t[:MAX_LINE_CHARS]
+        for k, start in enumerate(range(0, len(t), step)):
+            if k >= MAX_WINDOWS_PER_LINE or windows >= MAX_WINDOWS_PER_FILE:
+                cut_line = cut_line or n
+                break
+            windows += 1
+            yield n, t[start:start + MAX_LINE_CHARS], first
+            if start + MAX_LINE_CHARS >= len(t):
+                break
+    if on_limit:
+        if skipped_lines:
+            out.add("scan_limit", "medium", rel, 0,
+                    f"{skipped_lines} added line(s) were not searched (limits: {MAX_LINES_PER_FILE} per file, {MAX_LINES_TOTAL} per run)")
+        if cut_line:
+            out.add("scan_limit", "medium", rel, cut_line,
+                    "a very long line was only searched in part (minified or padded to hide text)")
 
 
 def scan(added: dict[str, dict[int, str]],
@@ -470,15 +542,7 @@ def scan(added: dict[str, dict[int, str]],
             for n, t in lines.items():
                 if _WF_HEAD_CHECKOUT.search(t[:MAX_LINE_CHARS]):
                     head_checkout = True
-        scanned = 0
-        for n in sorted(lines):
-            scanned += 1
-            if scanned > MAX_LINES_PER_FILE:
-                out.dropped += len(lines) - MAX_LINES_PER_FILE
-                break
-            t = lines[n]
-            if len(t) > MAX_LINE_CHARS:
-                t = t[:MAX_LINE_CHARS]
+        for n, t, first_t in _units(lines, out, rel, on("scan_limit")):
             if not t.strip():
                 continue
             low_t = t.lower()
@@ -557,7 +621,7 @@ def scan(added: dict[str, dict[int, str]],
             if on("remote_script") and _REMOTE_SCRIPT.search(t):
                 out.add("remote_script", "high", rel, n, "downloads a script and runs it unseen")
 
-            comment = _is_comment(t)
+            comment = _is_comment(first_t)
             if is_doc or comment:
                 continue
 
@@ -634,8 +698,8 @@ def scan(added: dict[str, dict[int, str]],
                         out.add("test_weakening", "medium", rel, 0,
                                 "a test or security-scan step is removed from CI")
                         break
-    out.items.sort(key=lambda f: (SEVERITY_ORDER.index(f.severity), f.file, f.line, f.cls))
-    return out.items, out.dropped
+    kept = out.capped()
+    return kept, out.dropped
 
 
 def points(findings: list[Finding]) -> tuple[int, dict[str, str]]:

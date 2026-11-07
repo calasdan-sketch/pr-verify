@@ -97,17 +97,22 @@ round (Mergify's docs page failed to load): treat any claim about them as
 unverified. Open-source scanners that do one slice of the risk classes
 (detect-secrets, bandit, zizmor) are run in `benchmarks/competitors.py`.
 
-Git AI's own limitations page says attribution is only partly kept through
-the squash and rebase merges a host does on its server, and lost through
-renames ([source](https://deepwiki.com/acunniffe/git-ai/13-limitations-and-future-work));
-PR Verify has the mirror-image limit (see Honest limits): it can only see
-what the commits say. The two can work together.
+Git AI's product page now says its attributions "carry through rebases,
+squashes, and cherry-picks" (read 2026-11-07); an older third-party page
+([source](https://deepwiki.com/acunniffe/git-ai/13-limitations-and-future-work))
+described them as only partly kept through the squash merges a host does on
+its server and lost through renames. Which is current was not tested here:
+treat both as claims. PR Verify has the mirror-image limit (see Honest limits):
+it can only see what the commits say. The two can work together. The Git AI
+page does not mention PR checks or risk scoring; the CodeRabbit docs page
+mentions ranking a PR queue by "value and risk" without saying how (both read
+2026-11-07).
 
 ## New in 0.3: what the lines say, a review plan, rules, SARIF
 
 **Risk classes** (`risk_classes` factor, up to 25 points). Looks at the
 added and removed lines themselves, deterministic regular expressions, no
-model. Fifteen classes: `hidden_text` (bidi, zero-width, tag characters,
+model. Fifteen classes (and `scan_limit`, below): `hidden_text` (bidi, zero-width, tag characters,
 mixed-script look-alike words: Trojan Source), `prompt_injection` (sentences
 addressed to an AI reviewer), `secret`, `ci_workflow` (`pull_request_target`
 with a checkout of the PR's code, workflow script injection, unpinned
@@ -159,24 +164,54 @@ A person called "Cody Smith" with the address `cody@...` is no longer an
 agent (the local part of an address only counts for bot-shaped names);
 `openhands` is a default marker.
 
+**Round 3 (still 0.3.0, unreleased): attacking the scanner.** A hostile
+author pads a line past 4,000 characters, or adds 40 harmless findings in
+front of a secret, or puts 20,000 lines before a payload: each of these used
+to leave the score untouched. Now:
+
+- A long line is searched in overlapping windows (up to 64 per line, 4,000
+  per file); what is past the limits is a `scan_limit` finding (medium, 4
+  points) that says how much was not searched. `deny_classes: [scan_limit]`
+  makes it fail the check; `risk_class_off: [scan_limit]` or
+  `risk_class_ignore_paths` silences it for a generated file.
+- The caps (40 findings per file, 400 per run) keep the most severe findings,
+  not the first ones, and the score is worked out from what was kept.
+- Up to 100,000 added lines per file and 500,000 per run are searched (it was
+  20,000 per file).
+- New rules: SQL built from a string (f-string, `+`, `%`, `.format`, template
+  literal inside `execute`/`query`/`raw`), PHP `system($var)`,
+  `__import__(...).system`, `getattr(os, "system")`, one more wording aimed at
+  an AI reviewer. Extensionless scripts in `bin/` or `scripts/`, `Makefile`,
+  `Rakefile`, `.pyw`, `.phtml`, `.bat` and a few more extensions are now
+  searched as code.
+- `pr-verify rules` lists the class names and points (no repository needed).
+- SARIF: each rule carries `security-severity` and the `security` tag (GitHub
+  reads them from the rule) and each result a `partialFingerprints` entry, so
+  an alert survives a shifted line number. Not tested against a live GitHub
+  upload (no network or account used here).
+- Speed: `git blame` runs a few files at a time (`PR_VERIFY_WORKERS`, default
+  up to 4, 1 turns it off; same report either way, checked by a test) and the
+  Python import scan visits statements only (about 5x less time in that walk;
+  parsing, now most of it, is unchanged).
+
 ## Benchmarks (re-run them: nothing here is taken on trust)
 
 ```bash
-python benchmarks/riskclass_bench.py --misses   # risk classes, 134 diffs
+python benchmarks/riskclass_bench.py --misses   # risk classes, 151 diffs
 python benchmarks/attribution_bench.py --misses # line attribution, 29 histories
 /tmp/v/bin/python benchmarks/competitors.py     # detect-secrets and bandit, same diffs
 ```
 
 | Measure | Before (0.2.0) | 0.3.0 |
 |---|---|---|
-| "Is this diff risky, and why?", precision / recall (134 diffs, 94 risky) | 0.80 / 0.09 (path globs only) | 1.00 / 1.00 |
+| "Is this diff risky, and why?", precision / recall (151 diffs, 108 risky) | 0.80 / 0.07 (path globs only) | 1.00 / 1.00 |
 | Risk class named correctly, micro precision / recall | n/a | 1.00 / 1.00 |
 | Which lines an agent wrote, precision / recall (29 synthetic histories, 75 lines) | 0.74 / 0.84 | 1.00 / 1.00 |
-| Secret found, precision / recall, against detect-secrets 1.5.0 | n/a | 1.00 / 1.00 vs 0.88 / 0.64 |
-| Unsafe Python call, against bandit | n/a | 1.00 / 1.00 vs 0.38 / 0.60 |
+| Secret found, precision / recall, against detect-secrets 1.5.0 (earlier 134-diff corpus; not re-run in round 3) | n/a | 1.00 / 1.00 vs 0.88 / 0.64 |
+| Unsafe Python call, against bandit (earlier corpus; not re-run) | n/a | 1.00 / 1.00 vs 0.38 / 0.60 |
 
 Read these as regression numbers, not as accuracy on the world's code. Both
-corpora were written by the tool's author; 32 of the 134 diffs were added
+corpora were written by the tool's author; 49 of the 151 diffs were added
 after the first run, and the first run's misses were fixed, so the 1.00 is a
 floor the code must not fall below (tests fail under 0.97), not a promise.
 The attribution corpus is built to contain the cases that were failing. The
@@ -665,14 +700,19 @@ compares, so the output below cannot drift from the code:
 
 ## Honest limits
 
+- Rules read one line at a time: `eval` and `(x)` on two lines joined by a
+  backslash, or a string assembled from pieces, is not seen. Round 3 closed
+  the length and count escapes, not this.
 - Risk classes read only the added and removed lines: a one-line change that
   is dangerous because of the code around it is not seen, and a regular
   expression cannot tell code from prose in every language (comment-only
   lines are not searched for code patterns). A hit is a reason to read, not a
   verdict. Prompt-injection phrases are a list of known wordings; a new one
   will pass. At most 40 findings per file and 400 in all are listed (the
-  report says how many were left out); a file is searched up to 20,000 added
-  lines. The scan costs about 11 microseconds per added line.
+  report says how many were left out); a file is searched up to 100,000 added
+  lines (500,000 per run), longer lines in windows. The scan costs about
+  19 microseconds per added line on one busy machine (the same as before
+  round 3, within noise).
 - The review plan's reviewer count is a floor derived from the formula in
   `reviewplan.py`, not a policy of your organisation. CODEOWNERS sections
   (GitLab syntax) are read as plain rules; with more than a million
