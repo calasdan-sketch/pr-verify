@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.3.0 (unreleased)
+
+Expert round 2: from "which lines" to "what they can break and where to look".
+
+Added
+
+- Risk classes: 15 content-based classes (hidden/bidi characters, prompt
+  injection aimed at review bots, secrets, CI trust changes such as
+  `pull_request_target`, dependency and lockfile changes, install scripts,
+  unsafe calls, switched-off security controls, weak crypto, permissions,
+  destructive migrations, IaC, removed guards, weakened tests) as a new
+  `risk_classes` factor (max 25 points) and `risk_classes` in the JSON.
+- Review plan (`review_plan` in JSON, a section in the human and Markdown
+  reports): depth, suggested reviewers, CODEOWNERS owners read from the base
+  ref, risky files with no owner, "read first" list.
+- `policy:` rules (limits, agent allow/deny paths, tests required, denied
+  classes), fail closed on bad config; a violation exits 1 and counts in the
+  `gates` factor.
+- `--format sarif`, `--sarif-file`, Action input `sarif-file`.
+- `agent_lines` per file in the JSON; `risk_class_ignore_paths`,
+  `risk_class_off`, `blame_detect_moves` settings.
+- A note when the branch edits `.pr-verify.yaml` (the base's copy stays in
+  effect).
+- `benchmarks/`: risk-class corpus (134 diffs), attribution corpus (29
+  histories), competitor script; tests hold the thresholds.
+
+Changed
+
+- `git blame` runs with `-w -M -C`: re-indents and moves no longer move the
+  credit (attribution precision 0.74 -> 1.00, recall 0.84 -> 1.00 on the
+  synthetic histories).
+- A "First Last" author whose address is `cody@...` is no longer matched by
+  the address's local part (domains still match). `openhands` is a default
+  marker.
+- Version 0.3.0. The score can be higher than in 0.2.0 for the same diff when
+  a risk class is found.
+
 ## 0.2.0 (unreleased)
 
 Review fixes (panel review of the first 0.2.0 commit)

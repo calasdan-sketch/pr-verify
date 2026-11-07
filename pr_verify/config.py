@@ -13,6 +13,8 @@ import subprocess
 
 from . import markers as markers_mod
 from . import miniyaml
+from . import policy as policy_mod
+from . import riskclass
 
 CONFIG_FILE = ".pr-verify.yaml"
 
@@ -32,6 +34,7 @@ DEFAULTS = {
     "agent_markers": [
         "claude", "claude code", "codex", "cursor", "cursor agent",
         "copilot", "github copilot", "bot", "aider", "cody", "devin",
+        "openhands",
         "co-authored-by: noreply@anthropic.com",
     ],
     # Globs (repo-relative) for security-sensitive areas. Matched against
@@ -65,6 +68,17 @@ DEFAULTS = {
     # included).
     "extra_agent_markers": [],
     "extra_sensitive_paths": [],
+    # Declarative rules the tool checks itself (see policy.py); a violation
+    # fails the check. Nothing is enforced until you set one.
+    "policy": {},
+    # git blame sees through re-indents (-w), moves inside a file (-M) and
+    # copies from another file of the same commit (-C) when it names who
+    # wrote a line. Turn off only if blame is too slow on a huge repository.
+    "blame_detect_moves": True,
+    # Files whose lines the risk-class scan skips (vendored, generated), and
+    # classes it does not report. Names: see riskclass.CLASSES.
+    "risk_class_ignore_paths": [],
+    "risk_class_off": [],
     "risk_threshold": 70,   # score >= this fails (see risk.gate); --min-score overrides
     "timeout": 300,         # seconds per gate
 }
@@ -115,7 +129,8 @@ def _read_base_config(root: str, base: str) -> dict:
 
 _INT_FIELDS = {"risk_threshold": (0, 100), "timeout": (1, None)}
 _LIST_FIELDS = ("agent_markers", "sensitive_paths", "gates",
-                "extra_agent_markers", "extra_sensitive_paths")
+                "extra_agent_markers", "extra_sensitive_paths",
+                "risk_class_ignore_paths", "risk_class_off")
 
 
 def _as_gate(g) -> str | list[str]:
@@ -144,6 +159,17 @@ def _as_int(key: str, val, lo: int | None, hi: int | None) -> int:
         rng = f"{lo}..{hi}" if hi is not None else f">= {lo}"
         raise ValueError(f"{CONFIG_FILE}: {key} must be {rng}, got {num}")
     return num
+
+
+def _as_bool(key: str, val) -> bool:
+    if isinstance(val, bool):
+        return val
+    text = str(val).strip().lower()
+    if text in ("true", "yes", "on", "1"):
+        return True
+    if text in ("false", "no", "off", "0"):
+        return False
+    raise ValueError(f"{CONFIG_FILE}: {key} must be true or false, got {val!r}")
 
 
 def _unknown_setting(key, base: str) -> str:
@@ -209,6 +235,17 @@ def load(root: str, base: str, warn=None) -> dict:
             f"could be recognised as an agent's - delete the line to get the "
             f"defaults back, or list your markers")
     cfg["gates"] = [_as_gate(g) for g in cfg["gates"]]
+    cfg["risk_class_ignore_paths"] = [str(x) for x in cfg["risk_class_ignore_paths"]]
+    cfg["risk_class_off"] = [str(x) for x in cfg["risk_class_off"]]
+    bad = [c for c in cfg["risk_class_off"] if c not in riskclass.CLASSES]
+    if bad:
+        raise ValueError(
+            f"{CONFIG_FILE} at {base}: risk_class_off names unknown class "
+            f"{bad[0]!r} (classes: {', '.join(riskclass.CLASSES)})")
+    cfg["blame_detect_moves"] = _as_bool("blame_detect_moves",
+                                         cfg["blame_detect_moves"])
+    cfg["policy"] = policy_mod.validate(cfg["policy"],
+                                        f"{CONFIG_FILE} at {base}")
     return cfg
 
 
@@ -252,6 +289,28 @@ def example_config() -> str:
         "#   gates:",
         '#     - "python -m pytest -x -q"',
         *_yaml_list("gates", DEFAULTS["gates"]),
+        "",
+        "# Files the risk-class scan skips (vendored or generated code), and",
+        "# classes it should not report (see the README for their names).",
+        *_yaml_list("risk_class_ignore_paths", DEFAULTS["risk_class_ignore_paths"]),
+        *_yaml_list("risk_class_off", DEFAULTS["risk_class_off"]),
+        "",
+        "# Policy rules the tool checks itself; a violation fails the check.",
+        "# None by default. For example:",
+        "#   policy:",
+        "#     max_files: 40",
+        "#     max_agent_lines: 600",
+        "#     require_tests_for_agent_code: true",
+        "#     agent_deny_paths:",
+        '#       - ".github/workflows/**"',
+        "#     deny_classes:",
+        "#       - hidden_text",
+        "#       - secret",
+        "policy:",
+        "",
+        "# git blame sees through re-indents and moved blocks when it names the",
+        "# writer of a line; false turns that off (faster on huge repositories).",
+        f"blame_detect_moves: {'true' if DEFAULTS['blame_detect_moves'] else 'false'}",
         "",
         "# The score at which the check fails (score >= this; --min-score",
         "# overrides), and the seconds each gate may take.",

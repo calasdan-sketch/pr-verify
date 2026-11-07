@@ -153,6 +153,8 @@ def verdict(result) -> tuple[bool, str]:
     failed = [g.command for g in result.gates if not g.passed]
     if failed:
         return False, "policy gate failed"
+    if getattr(result, "violations", None):
+        return False, f"{len(result.violations)} policy rule(s) broken"
     if min_score is None:
         return True, f"score {br.score}: score gate disabled (--fail-on never)"
     if br.requires_review:
@@ -185,6 +187,46 @@ def _factors(result) -> list[str]:
     for name, fac in result.breakdown.factors.items():
         lines.append(f"| {name} | {fac['points']} | "
                      f"{code(fac['detail'], table=True, limit=MAX_SENTENCE)} |")
+    return lines
+
+
+def _findings(result) -> list[list[str]]:
+    """Risk-class findings and broken policy rules, one entry each."""
+    entries = []
+    for fd in result.findings:
+        where = f"{fd.file}:{fd.line}" if fd.line else fd.file
+        entries.append([f"| {fd.severity} | {fd.cls} | {code(where, True)} | "
+                        f"{code(fd.why, True, limit=MAX_SENTENCE)} |"])
+    return entries
+
+
+def _violations(result) -> list[list[str]]:
+    return [[f"- **{v.rule}**: {code(v.detail, limit=MAX_SENTENCE)}"
+             + (f" ({code(v.file)}" + (f":{v.line}" if v.line else "") + ")"
+                if v.file else "")] for v in result.violations]
+
+
+def _plan(result) -> list[str]:
+    plan = getattr(result, "plan", None)
+    if not plan:
+        return []
+    lines = ["", "### Review plan", "",
+             f"**{plan['depth']}**, at least {plan['suggested_reviewers']} "
+             f"reviewer(s)."]
+    if plan.get("code_owners"):
+        lines += ["", "Code owners: "
+                  + ", ".join(code(o) for o in list(plan["code_owners"])[:20])]
+    if plan.get("risky_files_without_owner"):
+        lines += ["", "Risky files with no code owner: "
+                  + ", ".join(code(f) for f in
+                              plan["risky_files_without_owner"][:5])]
+    if plan["focus"]:
+        lines += ["", "Read first:", ""]
+        for item in plan["focus"][:8]:
+            a = item["lines"]
+            rng = (f":{a[0]}" + (f"-{a[1]}" if a[1] != a[0] else "")) if a else ""
+            lines.append(f"- {code(item['file'] + rng)} - {item['kind']}: "
+                         f"{code(item['why'], limit=MAX_SENTENCE)}")
     return lines
 
 
@@ -291,6 +333,9 @@ def render(result) -> str:
                 f" and {code(result.payload['head'])}: nothing to verify."]
         return "\n".join(body + footer) + "\n"
     out = _header(result) + _factors(result) + _gate_list(result)
+    if result.violations:
+        out += ["", "### Policy rules broken", ""]
+    add_later = _violations(result)
     # room for the footer and for one "left out" line per section
     budget = MAX_CHARS - _size(footer) - 3 * 200
 
@@ -307,6 +352,12 @@ def render(result) -> str:
             out += ["", f"… {left} more {what} not shown here: "
                         f"`--format json` has all of them."]
 
+    add(add_later, 30, "policy violation(s)")
+    if result.findings:
+        out += ["", "### Risk classes", "", "| Severity | Class | Where | Why |",
+                "|---|---|---|---|"]
+        add(_findings(result), 40, "finding(s)")
+    out += _plan(result)
     if getattr(result, "hide_gate_output", False):
         if any(not g.passed for g in result.gates):
             out += ["", "Gate output is left out of this report "

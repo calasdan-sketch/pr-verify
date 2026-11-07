@@ -33,9 +33,14 @@ from . import gates as gates_mod
 from . import provenance as prov_mod
 from . import mdreport
 from . import risk as risk_mod
+from . import riskclass as riskclass_mod
+from . import codeowners as codeowners_mod
+from . import policy as policy_mod
+from . import reviewplan as reviewplan_mod
+from . import sarif as sarif_mod
 from . import textsafe
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 #: Tried in order when --base is not given (after origin/HEAD).
 BASE_CANDIDATES = ("main", "master", "origin/main", "origin/master")
@@ -415,12 +420,49 @@ def _report_human(result: "CheckResult") -> None:
             for line in _gate_tail(g.output_tail):
                 _out(f"      | {line}")
     _out()
+    if result.findings:
+        _out("  risk classes (what the changed lines can break):")
+        for fd in result.findings[:12]:
+            where = f"{fd.file}:{fd.line}" if fd.line else fd.file
+            _out(f"    {fd.severity:8} {fd.cls:20} {where}")
+            _out(f"             {fd.why}")
+        more = len(result.findings) - 12 + result.findings_left_out
+        if more > 0:
+            _out(f"    … {more} more (--format json has all of them)")
+        _out()
+    if result.violations:
+        _out("  policy rules broken:")
+        for v in result.violations[:12]:
+            where = f" ({v.file}:{v.line})" if v.file and v.line else (
+                f" ({v.file})" if v.file else "")
+            _out(f"    {v.rule}: {v.detail}{where}")
+        if len(result.violations) > 12:
+            _out(f"    … {len(result.violations) - 12} more")
+        _out()
+    plan = result.plan
+    if plan:
+        _out(f"  review plan: {plan['depth']}, at least "
+             f"{plan['suggested_reviewers']} reviewer(s)")
+        if plan.get("code_owners"):
+            _out("    code owners: " + ", ".join(plan["code_owners"]))
+        if plan.get("risky_files_without_owner"):
+            _out("    risky files with no code owner: "
+                 + ", ".join(plan["risky_files_without_owner"][:5]))
+        for item in plan["focus"][:6]:
+            a = item["lines"]
+            rng = f":{a[0]}" + (f"-{a[1]}" if a[1] != a[0] else "") if a else ""
+            _out(f"    read first: {item['file']}{rng}  [{item['kind']}] "
+                 f"{item['why']}")
+        _out()
     _out("  risk factors:")
     for name, fac in breakdown.factors.items():
         _out(f"    {fac['points']:>3} pts  {name:12} {fac['detail']}")
     _out()
     failed = [g.command for g in gate_results if not g.passed]
-    if failed:
+    if result.violations and not failed:
+        _out(f"  ✗ {len(result.violations)} policy rule(s) broken")
+        score_mark = "-"
+    elif failed:
         # A failed policy gate fails the verification whatever the score:
         # the verdict line must say so, never end on a green tick.
         _out(f"  ✗ policy gate failed: {', '.join(failed)}")
@@ -456,6 +498,13 @@ class CheckResult:
     #: leave the gates' output out of the human and Markdown reports (the
     #: JSON keeps it): --hide-gate-output
     hide_gate_output: bool = False
+    #: what the changed lines can break (riskclass.Finding), how many more
+    #: were left out for the caps, the policy rules that were broken
+    #: (policy.Violation) and the review plan (reviewplan.build)
+    findings: list = dataclasses.field(default_factory=list)
+    findings_left_out: int = 0
+    violations: list = dataclasses.field(default_factory=list)
+    plan: dict = dataclasses.field(default_factory=dict)
 
     def nothing_lines(self) -> list[str]:
         """What the human report says when there is nothing to verify: one
@@ -564,16 +613,56 @@ def run_check(args) -> CheckResult:
                 f"{base} is {ahead} commit(s) ahead of where this branch "
                 f"left it: verifying from the merge-base {fork[:12]}, so only "
                 f"this branch's own changes are scored")
-    prov = prov_mod.analyze(root, diff_base, head_sha, cfg["agent_markers"])
+    if subprocess.run(["git", "-C", root, "diff", "--quiet", diff_base,
+                       head_sha, "--", config_mod.CONFIG_FILE],
+                      capture_output=True, timeout=15).returncode == 1:
+        notes.append(
+            f"this branch changes {config_mod.CONFIG_FILE}: the copy at "
+            f"{base} is in effect, so the branch cannot loosen its own "
+            f"rules - read that change as a request to loosen them")
+    prov = prov_mod.analyze(root, diff_base, head_sha, cfg["agent_markers"],
+                            detect_moves=cfg["blame_detect_moves"])
+    findings: list = []
+    left_out = 0
+    violations: list = []
+    plan: dict = {}
     if prov:
         blast = br_mod.analyze(root, list(prov.keys()))
         gate_results = (gates_mod.run_gates(root, cfg["gates"], cfg["timeout"])
                         if not args.skip_gates else [])
+        added_t, removed_t = prov_mod.patch_text(root, diff_base, head_sha)
+        added_t = {k: v for k, v in added_t.items()
+                   if k != config_mod.CONFIG_FILE}
+        removed_t = {k: v for k, v in removed_t.items()
+                     if k != config_mod.CONFIG_FILE}
+        findings, left_out = riskclass_mod.scan(
+            added_t, removed_t,
+            deleted=[f for f, p in prov.items() if p.deleted],
+            ignore_paths=cfg["risk_class_ignore_paths"],
+            off=cfg["risk_class_off"])
+        violations = policy_mod.evaluate(cfg["policy"], prov, findings)
         # requires_review is computed from the SAME threshold the exit code
         # uses (a disabled gate can never require review).
         breakdown = risk_mod.score(prov, blast, gate_results,
                                    cfg["sensitive_paths"],
-                                   101 if min_score is None else min_score)
+                                   101 if min_score is None else min_score,
+                                   findings=findings,
+                                   policy_violations=violations)
+        co_file, co_text = codeowners_mod.read_base(root, base_sha)
+        owners = None
+        if co_file:
+            rules = codeowners_mod.parse(co_text)
+            if len(rules) * len(prov) > codeowners_mod.MAX_WORK:
+                notes.append(f"{co_file} has {len(rules)} rules and this "
+                             f"branch {len(prov)} files: code owners were "
+                             f"not worked out")
+            else:
+                owners = {f: codeowners_mod.owners_of(f, rules) for f in prov}
+        _, top = riskclass_mod.points(findings)
+        plan = reviewplan_mod.build(
+            prov, blast, findings, top, breakdown.score,
+            breakdown.requires_review, owners, co_file,
+            risk_mod._sensitive_hits(list(prov), cfg["sensitive_paths"]))
     else:
         # Nothing added or deleted: nothing to scan or run, and nothing to
         # review whatever the threshold. The document below still has the
@@ -599,8 +688,17 @@ def run_check(args) -> CheckResult:
                   "external_only": b.external_only, "scan": b.scan}
             for rel, b in blast.items()},
         "gates": [g.as_dict() for g in gate_results],
+        "risk_classes": {"findings": [f.as_dict() for f in findings],
+                         "left_out": left_out},
+        "policy": {"violations": [v.as_dict() for v in violations]},
+        "review_plan": plan,
     }
-    if any(not g.passed for g in gate_results):
+    for rel, fp in prov.items():
+        payload["files"][rel]["agent_lines"] = fp.agent_lines
+    if violations:
+        # a broken policy rule is a failed verification, like a failed gate
+        code = 1
+    elif any(not g.passed for g in gate_results):
         # A failing policy gate is a failed verification, independent of
         # --fail-on: the tool cannot vouch for this diff.
         code = 1
@@ -613,12 +711,37 @@ def run_check(args) -> CheckResult:
                        min_score=min_score, base_detected=base_detected,
                        notes=notes, nothing=not prov,
                        hide_gate_output=bool(
-                           getattr(args, "hide_gate_output", False)))
+                           getattr(args, "hide_gate_output", False)),
+                       findings=findings, findings_left_out=left_out,
+                       violations=violations, plan=plan)
+
+
+def sarif_text(result: CheckResult) -> str:
+    """The SARIF 2.1.0 document of one check (findings and broken policy
+    rules, with file and line)."""
+    agent = {rel: set(fp.agent_lines) for rel, fp in result.prov.items()}
+    return sarif_mod.dumps(sarif_mod.build(VERSION, result.findings,
+                                           result.violations, agent))
+
+
+def write_sarif_file(result: CheckResult, path: str) -> bool:
+    """Write the SARIF document to path; False (one error line) when it
+    cannot be written."""
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(sarif_text(result) + "\n")
+    except OSError as e:
+        _eprint(f"error: could not write the SARIF file {path}: "
+                f"{e.strerror or e}")
+        return False
+    return True
 
 
 def render(result: CheckResult, fmt: str) -> None:
     if fmt == "json":
         print(json.dumps(result.payload, indent=2))    # exact: JSON escapes
+    elif fmt == "sarif":
+        print(sarif_text(result))
     elif fmt == "markdown":
         # each line through _out: mdreport has already put every name in a
         # code span, and _out keeps a line from reading as a workflow
@@ -658,6 +781,9 @@ def cmd_check(args) -> int:
         _eprint(f"error: {error_text(e)}")
         return 2
     if not write_report(result, args.format):
+        return 2
+    if getattr(args, "sarif_file", None) \
+            and not write_sarif_file(result, args.sarif_file):
         return 2
     return result.code
 
@@ -723,12 +849,18 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Also verify untracked (not yet `git add`ed) files. "
                         "Off by default: snapshotting writes their content "
                         "into .git/objects (a dangling commit, pruned by gc).")
-    c.add_argument("--format", choices=["human", "json", "markdown"],
+    c.add_argument("--format", choices=["human", "json", "markdown", "sarif"],
                    default="human",
                    help="human (default), json (one document, every number) "
                         "or markdown (for a pull request comment or a job "
                         "summary; names shown literally, never as links "
-                        "or HTML).")
+                        "or HTML) or sarif (SARIF 2.1.0 for GitHub code "
+                        "scanning: one result per finding, with file and "
+                        "line).")
+    c.add_argument("--sarif-file", default=None, metavar="PATH",
+                   help="Also write the SARIF 2.1.0 document to PATH, "
+                        "whatever --format is (upload it with "
+                        "github/codeql-action/upload-sarif).")
     c.add_argument("--fail-on", choices=["high", "any-risk", "never"],
                    default="high",
                    help="high: fail when score >= min-score (default); "

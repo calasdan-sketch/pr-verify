@@ -85,11 +85,107 @@ listed here; pick by the question you need answered.
 | Deterministic, formula published | yes ([the factors](#what-it-reports)) | n/a (records, does not score) | not stated | weights published; the analysis is an LLM's | no |
 | Open source | MIT | yes | no | yes | varies |
 
+Reviewers and rule engines, from their own pages (read 2026-11): Danger JS
+runs a `dangerfile` of your rules over file-level and PR-level data and its
+page does not mention who wrote a line
+([danger.systems/js](https://danger.systems/js/)); CodeRabbit reviews pull
+requests and its docs mention a triage view that ranks by "value and risk" but
+do not say how risk is scored, nor that it detects AI-authored lines
+([docs.coderabbit.ai](https://docs.coderabbit.ai/)). Greptile, Graphite,
+GitHub Copilot code review, Sonar, Mergify and Codecov were not read for this
+round (Mergify's docs page failed to load): treat any claim about them as
+unverified. Open-source scanners that do one slice of the risk classes
+(detect-secrets, bandit, zizmor) are run in `benchmarks/competitors.py`.
+
 Git AI's own limitations page says attribution is only partly kept through
 the squash and rebase merges a host does on its server, and lost through
 renames ([source](https://deepwiki.com/acunniffe/git-ai/13-limitations-and-future-work));
 PR Verify has the mirror-image limit (see Honest limits): it can only see
 what the commits say. The two can work together.
+
+## New in 0.3: what the lines say, a review plan, rules, SARIF
+
+**Risk classes** (`risk_classes` factor, up to 25 points). Looks at the
+added and removed lines themselves, deterministic regular expressions, no
+model. Fifteen classes: `hidden_text` (bidi, zero-width, tag characters,
+mixed-script look-alike words: Trojan Source), `prompt_injection` (sentences
+addressed to an AI reviewer), `secret`, `ci_workflow` (`pull_request_target`
+with a checkout of the PR's code, workflow script injection, unpinned
+actions), `dependency` (lockfile changed without its manifest, non-registry
+sources), `install_script`, `remote_script`, `unsafe_exec`, `weak_control`
+(TLS/CSRF/JWT checks off), `weak_crypto`, `permissions`,
+`destructive_migration`, `iac`, `guard_removed` (an auth or validation call
+taken out), `test_weakening`. Each finding has file, line and reason; a class
+counts once at its highest severity (critical 15, high 8, medium 4, low 1).
+Paths named by `sensitive_paths` are still the `sensitive` factor and are not
+counted twice. Skip vendored code with `risk_class_ignore_paths`, silence a
+class with `risk_class_off`.
+
+**Review plan.** `depth` (skim, standard, deep, security-review), a suggested
+reviewer count, the code owners of the changed files (CODEOWNERS read from the
+base ref, so a PR cannot pick its own reviewers), risky files nobody owns, and
+a "read first" list: findings by severity, then the runs of agent-written
+lines in the files with the biggest blast radius. The rule for each is in
+`pr_verify/reviewplan.py`.
+
+**Policy rules.** Checked by the tool itself, from the base ref's config; a
+broken rule fails the check (exit 1), a malformed one is a config error (exit
+2). A change to `.pr-verify.yaml` on the branch is reported in a note and does
+not take effect.
+
+```yaml
+policy:
+  max_files: 40
+  max_changed_lines: 1500
+  max_agent_lines: 600
+  require_tests_for_agent_code: true
+  agent_deny_paths: [".github/workflows/**", "**/migrations/**"]
+  agent_allow_paths: ["src/**", "tests/**"]   # if set, agents touch only these
+  deny_classes: [hidden_text, secret]          # any author
+  deny_agent_classes: [unsafe_exec, weak_control]   # lines an agent wrote
+```
+
+**SARIF.** `--format sarif`, or `--sarif-file out.sarif` next to any format
+(Action input `sarif-file`), for `github/codeql-action/upload-sarif`. Uploading
+needs `security-events: write`, which a fork's pull request token does not
+have.
+
+**Blame sees through moves.** `git blame` now runs with `-w -M -C` (setting
+`blame_detect_moves`, on by default): a human who re-indents an agent's code
+no longer takes the credit, an agent who re-indents or moves a human's block
+no longer takes the blame. On 200 files the extra flags cost under 2 percent
+(6.17 s without, 6.08 s with, one machine, synthetic repository).
+A person called "Cody Smith" with the address `cody@...` is no longer an
+agent (the local part of an address only counts for bot-shaped names);
+`openhands` is a default marker.
+
+## Benchmarks (re-run them: nothing here is taken on trust)
+
+```bash
+python benchmarks/riskclass_bench.py --misses   # risk classes, 134 diffs
+python benchmarks/attribution_bench.py --misses # line attribution, 29 histories
+/tmp/v/bin/python benchmarks/competitors.py     # detect-secrets and bandit, same diffs
+```
+
+| Measure | Before (0.2.0) | 0.3.0 |
+|---|---|---|
+| "Is this diff risky, and why?", precision / recall (134 diffs, 94 risky) | 0.80 / 0.09 (path globs only) | 1.00 / 1.00 |
+| Risk class named correctly, micro precision / recall | n/a | 1.00 / 1.00 |
+| Which lines an agent wrote, precision / recall (29 synthetic histories, 75 lines) | 0.74 / 0.84 | 1.00 / 1.00 |
+| Secret found, precision / recall, against detect-secrets 1.5.0 | n/a | 1.00 / 1.00 vs 0.88 / 0.64 |
+| Unsafe Python call, against bandit | n/a | 1.00 / 1.00 vs 0.38 / 0.60 |
+
+Read these as regression numbers, not as accuracy on the world's code. Both
+corpora were written by the tool's author; 32 of the 134 diffs were added
+after the first run, and the first run's misses were fixed, so the 1.00 is a
+floor the code must not fall below (tests fail under 0.97), not a promise.
+The attribution corpus is built to contain the cases that were failing. The
+comparison scanners answer narrower questions on diff fragments (bandit on
+`.py` files only; zizmor is installed by the script but refuses fragments, so
+it is not scored). Two scenarios no history-based tool can solve are printed
+but not scored: a squash merge under one human author with no trailer
+(agent lines missed), and a squash that lists an agent trailer for only some
+of its commits (the human lines are credited to the agent).
 
 ## What it reports
 
@@ -372,6 +468,8 @@ never agent-written.
 
 ## The config file
 
+New in 0.3: `policy`, `risk_class_ignore_paths`, `risk_class_off`, `blame_detect_moves` (see above).
+
 `.pr-verify.yaml` is read **from the base ref**, not from the worktree —
 a hostile PR must not be able to ship its own gate config and get it
 executed. That means a freshly written config does nothing until it is
@@ -547,6 +645,11 @@ compares, so the output below cannot drift from the code:
   gates:
     none configured
 
+  review plan: standard, at least 1 reviewer(s)
+    read first: app/core.py:7-10  [agent_written] 4 line(s) written by an agent; 1 dependent(s)
+    read first: app/auth.py:3-6  [agent_written] 4 line(s) written by an agent
+    read first: app/views.py:1  [agent_written] 1 line(s) written by an agent
+
   risk factors:
      28 pts  agent_share  9/13 added lines agent-authored (69%)
       4 pts  blast        largest blast radius: 1 downstream dependent(s)
@@ -554,6 +657,7 @@ compares, so the output below cannot drift from the code:
       0 pts  gates        no gates configured
       5 pts  no_tests     source changed with no test changes
       0 pts  deletion     no agent-attributed deletions
+      0 pts  risk_classes no risk class found in the changed lines
 
   ✓ score 57 < min-score 70
 ════════════════════════════════════════════════════════
@@ -561,6 +665,18 @@ compares, so the output below cannot drift from the code:
 
 ## Honest limits
 
+- Risk classes read only the added and removed lines: a one-line change that
+  is dangerous because of the code around it is not seen, and a regular
+  expression cannot tell code from prose in every language (comment-only
+  lines are not searched for code patterns). A hit is a reason to read, not a
+  verdict. Prompt-injection phrases are a list of known wordings; a new one
+  will pass. At most 40 findings per file and 400 in all are listed (the
+  report says how many were left out); a file is searched up to 20,000 added
+  lines. The scan costs about 11 microseconds per added line.
+- The review plan's reviewer count is a floor derived from the formula in
+  `reviewplan.py`, not a policy of your organisation. CODEOWNERS sections
+  (GitLab syntax) are read as plain rules; with more than a million
+  rules-times-files the owners are not worked out and a note says so.
 - Provenance depends on commit authorship — squashed or rebased PRs lose
   per-commit attribution (tune `agent_markers` for your workflow). An agent
   committing under a plain human identity with no trailer is invisible.
@@ -622,6 +738,8 @@ and their executables resolved through `PATHEXT`, and the test suite uses
 no `true`/`false`/`touch` and never reads your global gitconfig.
 
 ## Tests
+
+`tests/test_expert2.py` covers 0.3 (risk classes, hidden text, policy, review plan, SARIF, CODEOWNERS from the base, the two benchmarks as regression thresholds).
 
 ```bash
 python3 -m unittest discover -s tests   # or: python3 -m pytest -q

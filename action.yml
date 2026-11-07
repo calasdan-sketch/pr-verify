@@ -10,7 +10,7 @@ inputs:
     required: false
     default: HEAD
   format:
-    description: Report format, human, json or markdown (same as --format). The job summary is always Markdown.
+    description: Report format, human, json, markdown or sarif (same as --format). The job summary is always Markdown.
     required: false
     default: human
   fail-on:
@@ -29,6 +29,10 @@ inputs:
     description: Set to true to leave what a failed gate printed out of the log report and the job summary (same as --hide-gate-output); the json format keeps it.
     required: false
     default: "false"
+  sarif-file:
+    description: Also write the SARIF 2.1.0 document to this path (same as --sarif-file), for github/codeql-action/upload-sarif. Empty writes none.
+    required: false
+    default: ""
   root:
     description: Path inside the repository (same as --root); the repository's top level is verified. Empty means the working directory.
     required: false
@@ -59,6 +63,7 @@ runs:
         PR_VERIFY_MIN_SCORE: ${{ inputs.min-score }}
         PR_VERIFY_SKIP_GATES: ${{ inputs.skip-gates }}
         PR_VERIFY_HIDE_GATE_OUTPUT: ${{ inputs.hide-gate-output }}
+        PR_VERIFY_SARIF_FILE: ${{ inputs.sarif-file }}
         PR_VERIFY_ROOT: ${{ inputs.root }}
       # -I: the checkout (the working directory) is data, never imported from;
       # see run_action.py. Nothing to install: pr-verify has no dependencies.

@@ -28,6 +28,7 @@ can assert action.yml and the CLI agree:
     min-score   PR_VERIFY_MIN_SCORE   --min-score   (empty = use config)
     skip-gates  PR_VERIFY_SKIP_GATES  --skip-gates  ('true' = set)
     hide-gate-output  PR_VERIFY_HIDE_GATE_OUTPUT  --hide-gate-output
+    sarif-file  PR_VERIFY_SARIF_FILE  --sarif-file  (empty = none)
     root        PR_VERIFY_ROOT        --root        (global flag)
 """
 
@@ -49,6 +50,7 @@ INPUTS: dict[str, tuple[str, str, str]] = {
     "skip-gates": ("PR_VERIFY_SKIP_GATES", "--skip-gates", "flag"),
     "hide-gate-output": ("PR_VERIFY_HIDE_GATE_OUTPUT", "--hide-gate-output",
                          "flag"),
+    "sarif-file": ("PR_VERIFY_SARIF_FILE", "--sarif-file", "value"),
     "root": ("PR_VERIFY_ROOT", "--root", "global"),
 }
 

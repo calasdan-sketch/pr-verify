@@ -737,7 +737,10 @@ class TestInitWritesTheRealDefaults(unittest.TestCase):
         text = config_mod.example_config()
         parsed = miniyaml.safe_load(text)
         for key, default in config_mod.DEFAULTS.items():
-            self.assertEqual(parsed[key], default, key)
+            got = parsed[key]
+            if key == "policy" and got is None:
+                got = {}     # an empty mapping is written as a bare `policy:`
+            self.assertEqual(got, default, key)
         self.assertEqual(set(parsed), set(config_mod.DEFAULTS))
 
     def test_the_template_goes_through_the_loader_unchanged(self):

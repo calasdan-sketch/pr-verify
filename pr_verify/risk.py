@@ -22,6 +22,11 @@ can argue with it and tune it — a black-box score is just another opinion.
                       never trip the high threshold; deleting auth.py is at
                       least as scary as rewriting it.
 
+  risk_classes 25 pts  what the changed lines can break, found in their text
+                      (secrets, hidden characters, CI trust changes, ...):
+                      15 critical / 8 high / 4 medium / 1 low per class at
+                      its highest severity, capped (see riskclass.py)
+
 Bands: 0-29 low · 30-69 medium · 70-100 high — labels only.
 
 THE GATE (one rule, everywhere): the verification fails when
@@ -47,6 +52,7 @@ import os
 from . import blastradius as br_mod
 from . import gates as gates_mod
 from . import provenance as prov_mod
+from . import riskclass as riskclass_mod
 
 
 @dataclasses.dataclass
@@ -107,7 +113,9 @@ def score(prov: dict[str, prov_mod.FileProvenance],
           blast: dict[str, br_mod.BlastRadius],
           gate_results: list[gates_mod.GateResult],
           sensitive_paths: list[str],
-          threshold: int) -> RiskBreakdown:
+          threshold: int,
+          findings: list | None = None,
+          policy_violations: list | None = None) -> RiskBreakdown:
     factors: dict[str, dict] = {}
 
     total_added = sum(f.added for f in prov.values())
@@ -144,13 +152,15 @@ def score(prov: dict[str, prov_mod.FileProvenance],
 
     failed = [g.command for g in gate_results
               if not g.passed]
-    pts = 10 if failed else 0
-    factors["gates"] = {
-        "points": pts,
-        "detail": (f"failed gates: {', '.join(failed)}"
-                   if failed else
-                   f"{len(gate_results)} gate(s) passed"
-                   if gate_results else "no gates configured")}
+    broken = list(policy_violations or [])
+    pts = 10 if (failed or broken) else 0
+    detail = (f"failed gates: {', '.join(failed)}"
+              if failed else
+              f"{len(gate_results)} gate(s) passed"
+              if gate_results else "no gates configured")
+    if broken:
+        detail += f"; {len(broken)} policy violation(s)"
+    factors["gates"] = {"points": pts, "detail": detail}
 
     src_changed = any(not _is_test_file(f) for f in prov)
     tests_changed = any(_is_test_file(f) for f in prov)
@@ -191,6 +201,17 @@ def score(prov: dict[str, prov_mod.FileProvenance],
         factors["deletion"] = {
             "points": 0,
             "detail": "no agent-attributed deletions"}
+
+    # What the added and removed lines say they can break (riskclass.py).
+    # Path-based classes (auth, crypto, payment, migrations) are the
+    # `sensitive` factor above and are not counted twice.
+    cls_pts, top = riskclass_mod.points(findings or [])
+    factors["risk_classes"] = {
+        "points": cls_pts,
+        "detail": ("; ".join(f"{c} ({s})" for c, s in
+                             sorted(top.items(),
+                                    key=lambda kv: (riskclass_mod.SEVERITY_ORDER.index(kv[1]), kv[0])))
+                   or "no risk class found in the changed lines")}
 
     total = min(100, sum(f["points"] for f in factors.values()))
     band = "low" if total < 30 else "medium" if total < 70 else "high"

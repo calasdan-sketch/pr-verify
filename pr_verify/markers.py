@@ -111,7 +111,13 @@ def name_matches(name: str, marker: str) -> bool:
     return _contains_sequence(body_words, mw)
 
 
-def email_matches(email: str, marker: str) -> bool:
+def human_shaped(name: str) -> bool:
+    """A "First Last" name: two or more words outside any [bracket] or
+    (parenthesis) tag. Such a name is a person's, whatever their address."""
+    return len(_TAG_RE.sub(" ", name or "").split()) >= 2
+
+
+def email_matches(email: str, marker: str, local_part: bool = True) -> bool:
     """Rule 2: author/co-author email. A marker with an `@` in it is a whole
     address (rule 4)."""
     mw = _marker_words(marker)
@@ -120,13 +126,17 @@ def email_matches(email: str, marker: str) -> bool:
     if "@" in marker:
         return email.strip().lower() == marker.strip().lower()
     local, _, domain = email.strip().lower().rpartition("@")
-    if _words(local) == mw:
-        return True
-    # hyphen/underscore/plus-separated words of the local part; dots are
-    # left alone (first.last)
-    for piece in re.split(r"[-_+]", local):
-        if piece and _words(piece) == mw:
+    # The local part (cody@, claude-bot@) is a bot's handle; a person called
+    # "Cody Smith" with the address cody@ is still a person. The domain
+    # (@cursor.com, @aider.chat) is checked either way.
+    if local_part:
+        if _words(local) == mw:
             return True
+        # hyphen/underscore/plus-separated words of the local part; dots are
+        # left alone (first.last)
+        for piece in re.split(r"[-_+]", local):
+            if piece and _words(piece) == mw:
+                return True
     for label in domain.split("."):
         if _words(label) == mw:
             return True
@@ -171,12 +181,14 @@ def match(name: str, email: str, subject: str, body: str,
         if not marker:
             continue
         if not trailer_only:
-            if name_matches(name, marker) or email_matches(email, marker):
+            if name_matches(name, marker) or email_matches(
+                    email, marker, local_part=not human_shaped(name)):
                 return raw
             if (subject_prefix and "@" not in marker
                     and _words(subject_prefix) == _marker_words(marker)):
                 return raw
         for t_name, t_email in trailers:
-            if name_matches(t_name, marker) or email_matches(t_email, marker):
+            if name_matches(t_name, marker) or email_matches(
+                    t_email, marker, local_part=not human_shaped(t_name)):
                 return raw
     return None

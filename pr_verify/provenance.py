@@ -202,6 +202,8 @@ class FileProvenance:
     #: `deleted`, not this), and how many of those an agent's commit removed
     removed: int = 0
     agent_removed: int = 0
+    #: the added line numbers (at head) that an agent's commit wrote
+    agent_lines: list = dataclasses.field(default_factory=list)
 
     @property
     def changed(self) -> int:
@@ -326,12 +328,17 @@ def _patch(root: str, base: str, head: str) -> str:
         return run(*_PATCH, base, head, "--")
 
 
-def _walk_patch(out: str) -> tuple[dict[str, list[int]],
-                                   dict[str, list[int]], dict[str, str]]:
+def _walk_patch(out: str, added_text: dict | None = None,
+                removed_text: dict | None = None
+                ) -> tuple[dict[str, list[int]],
+                           dict[str, list[int]], dict[str, str]]:
     """(file -> sorted added line numbers at head, file -> sorted numbers of
     the lines removed, in the OLD file, file -> its name in the old tree when
     that differs) of a patch. A file that is gone (`+++ /dev/null`) has no
-    entry in any: whole-file deletions are reported as such."""
+    entry in any: whole-file deletions are reported as such.
+
+    With `added_text` (file -> {line number: text}) and `removed_text` (file
+    -> [text]) given, the text of the lines is collected into them too."""
     result: dict[str, list[int]] = {}
     taken: dict[str, list[int]] = {}
     old_names: dict[str, str] = {}
@@ -352,11 +359,15 @@ def _walk_patch(out: str) -> tuple[dict[str, list[int]],
                 old_left -= 1
                 if cur_file is not None:
                     taken.setdefault(cur_file, []).append(old_line)
+                    if removed_text is not None:
+                        removed_text.setdefault(cur_file, []).append(line[1:])
                 old_line += 1
                 continue
             if mark == "+" and new_left:
                 if cur_file is not None:
                     result[cur_file].append(new_line)
+                    if added_text is not None:
+                        added_text.setdefault(cur_file, {})[new_line] = line[1:]
                 new_line += 1
                 new_left -= 1
                 continue
@@ -395,6 +406,16 @@ def _scan_patch(out: str) -> tuple[dict[str, list[int]], dict[str, int]]:
     removed) of a patch (see _walk_patch)."""
     added, taken, _ = _walk_patch(out)
     return added, {f: len(ns) for f, ns in taken.items()}
+
+
+def patch_text(root: str, base: str, head: str = "HEAD"
+               ) -> tuple[dict[str, dict[int, str]], dict[str, list[str]]]:
+    """(file -> {added line number: its text}, file -> [removed texts])
+    between base and head, read the way analyze() reads the diff."""
+    added: dict[str, dict[int, str]] = {}
+    removed: dict[str, list[str]] = {}
+    _walk_patch(_patch(root, base, head), added, removed)
+    return added, removed
 
 
 def added_lines(root: str, base: str, head: str = "HEAD") -> dict[str, list[int]]:
@@ -547,10 +568,20 @@ def _parse_blame(out: str) -> tuple[dict[int, str], set[str]]:
     return authors, boundary
 
 
+#: What `git blame` is asked to see through when it names the writer of an
+#: added line: -w a re-indent or re-wrap (whitespace only), -M a block moved
+#: inside the file, -C a block copied or moved from another file the same
+#: commit touched. Without them, whoever last re-indented or moved a block
+#: gets the credit (or the blame) for lines they did not write.
+BLAME_DETECT = ("-w", "-M", "-C")
+
+
 def _blame_authors(root: str, head: str, rel: str,
-                   options: list[str] | tuple = ()) -> dict[int, str]:
+                   options: list[str] | tuple = (),
+                   detect_moves: bool = True) -> dict[int, str]:
     """Line number -> commit sha, for <head> version of file."""
-    out = _git(root, "blame", "--porcelain", *options, head, "--", rel)
+    flags = list(BLAME_DETECT) if detect_moves else []
+    out = _git(root, "blame", "--porcelain", *flags, *options, head, "--", rel)
     return _parse_blame(out)[0]
 
 
@@ -656,7 +687,8 @@ def agent_label(name: str, marker: str) -> str:
 
 
 def analyze(root: str, base: str, head: str = "HEAD",
-            agent_markers: list[str] | None = None) -> dict[str, FileProvenance]:
+            agent_markers: list[str] | None = None,
+            detect_moves: bool = True) -> dict[str, FileProvenance]:
     agent_markers = [str(m).lower() for m in (agent_markers or [])]
     added, removed = _scan_patch(_patch(root, base, head))
     added = {rel: lines for rel, lines in added.items() if rel != CONFIG_FILE}
@@ -671,7 +703,7 @@ def analyze(root: str, base: str, head: str = "HEAD",
     blame_options = _blame_options(root) if added or removed else []
     for rel in added:
         try:
-            bm = _blame_authors(root, head, rel, blame_options)
+            bm = _blame_authors(root, head, rel, blame_options, detect_moves)
         except RuntimeError:
             if not _is_gitlink(root, head, rel):
                 raise
@@ -721,6 +753,7 @@ def analyze(root: str, base: str, head: str = "HEAD",
             sha = bm.get(ln)
             if sha in matched:
                 fp.agent_added += 1
+                fp.agent_lines.append(ln)
                 fp.agents.add(agent_label(who(sha), matched[sha]))
             else:
                 fp.human_added += 1
