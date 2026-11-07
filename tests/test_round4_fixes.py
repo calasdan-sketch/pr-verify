@@ -1628,7 +1628,9 @@ def _acted_on(text: str) -> list[str]:
                    or 0x7F <= ord(c) <= 0x9F
                    or ord(c) in (0x2028, 0x2029)
                    or 0x202A <= ord(c) <= 0x202E
-                   or 0x2066 <= ord(c) <= 0x2069})
+                   or 0x2066 <= ord(c) <= 0x2069
+                   # a byte of a non-UTF-8 path kept as a lone surrogate
+                   or 0xDC80 <= ord(c) <= 0xDCFF})
 
 
 class TestNeutralize(unittest.TestCase):

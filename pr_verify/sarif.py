@@ -39,7 +39,8 @@ RULES = {
 
 
 def _uri(path: str) -> str:
-    return urllib.parse.quote(path.replace("\\", "/"), safe="/")
+    return urllib.parse.quote(path.replace("\\", "/"), safe="/",
+                              errors="surrogateescape")
 
 
 def build(version: str, findings: list, violations: list, agent_lines: dict | None = None) -> dict:
@@ -106,4 +107,4 @@ def build(version: str, findings: list, violations: list, agent_lines: dict | No
 
 
 def dumps(doc: dict) -> str:
-    return json.dumps(doc, indent=2)
+    return json.dumps(textsafe.scrub(doc), indent=2)

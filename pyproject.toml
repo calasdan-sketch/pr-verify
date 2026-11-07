@@ -8,6 +8,7 @@ version = "0.3.0"
 description = "Deterministic trust scoring for agent-authored PRs."
 readme = "README.md"
 requires-python = ">=3.10"
+authors = [{ name = "Calas Automations Inc." }]
 license = "MIT"
 license-files = ["LICENSE"]
 keywords = [
@@ -25,11 +26,14 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Version Control :: Git",
 ]
 
 [project.urls]
 Homepage = "https://github.com/calasdan-sketch/pr-verify"
 Issues = "https://github.com/calasdan-sketch/pr-verify/issues"
+Source = "https://github.com/calasdan-sketch/pr-verify"
+Changelog = "https://github.com/calasdan-sketch/pr-verify/blob/main/CHANGELOG.md"
 
 [project.scripts]
 pr-verify = "pr_verify.cli:main"

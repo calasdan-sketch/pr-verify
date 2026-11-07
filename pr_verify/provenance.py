@@ -107,11 +107,15 @@ def _git_bytes(root: str, *args: str, env: dict | None = None) -> bytes:
     return p.stdout
 
 
-def _git(root: str, *args: str, env: dict | None = None) -> str:
+def _git(root: str, *args: str, env: dict | None = None,
+         errors: str = "replace") -> str:
     """stdout of `git <args>`. Decoded here from the raw bytes: with
     text=True subprocess first turns every lone \\r into \\n, so a file line
     holding one would read like a line break of git's own output."""
-    return _git_bytes(root, *args, env=env).decode("utf-8", "replace")
+    # errors="surrogateescape" keeps a byte that is not UTF-8 (a file named
+    # caf<0xE9>.py) as a lone surrogate, which the file system layer turns
+    # back into the same byte when the name goes to `git blame`.
+    return _git_bytes(root, *args, env=env).decode("utf-8", errors)
 
 
 def untracked_files(root: str) -> list[str]:
@@ -266,7 +270,7 @@ def unquote_git_path(s: str) -> str:
         else:
             out += _C_ESCAPES.get(esc, esc).encode("utf-8")
             i += 1
-    return out.decode("utf-8", "replace")
+    return out.decode("utf-8", "surrogateescape")
 
 
 def _header_path(line: str, side: str = "b/") -> str | None:
@@ -307,7 +311,7 @@ def _plumbing_view(root: str):
 
         def run(*args: str) -> str:
             return _git(empty, "--git-dir", gitdir, "--work-tree", empty,
-                        *args, env=env)
+                        *args, env=env, errors="surrogateescape")
         yield run
 
 

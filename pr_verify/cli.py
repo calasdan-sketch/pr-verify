@@ -40,7 +40,7 @@ from . import reviewplan as reviewplan_mod
 from . import sarif as sarif_mod
 from . import textsafe
 
-VERSION = "0.3.0"
+from . import __version__ as VERSION
 
 #: Tried in order when --base is not given (after origin/HEAD).
 BASE_CANDIDATES = ("main", "master", "origin/main", "origin/master")
@@ -754,7 +754,7 @@ def write_sarif_file(result: CheckResult, path: str) -> bool:
 
 def render(result: CheckResult, fmt: str) -> None:
     if fmt == "json":
-        print(json.dumps(result.payload, indent=2))    # exact: JSON escapes
+        print(json.dumps(textsafe.scrub(result.payload), indent=2))    # exact: JSON escapes
     elif fmt == "sarif":
         print(sarif_text(result))
     elif fmt == "markdown":
@@ -843,15 +843,23 @@ def build_parser() -> argparse.ArgumentParser:
                         "verified, also when this is a subdirectory.")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    i = sub.add_parser("init", help="Write example .pr-verify.yaml.")
+    def _root_too(sp):
+        # `pr-verify check --root X` is what people type; argparse only
+        # takes a top-level option before the subcommand. SUPPRESS keeps
+        # the value given before the subcommand when this one is absent.
+        sp.add_argument("--root", default=argparse.SUPPRESS,
+                        help="Same as the top-level --root.")
+        return sp
+
+    i = _root_too(sub.add_parser("init", help="Write example .pr-verify.yaml."))
     i.add_argument("--force", action="store_true",
                    help="Overwrite a .pr-verify.yaml that is already there "
                         "(without it init leaves the file alone and exits "
                         "2).")
 
-    sub.add_parser("rules", help="List the risk classes and their points.")
+    _root_too(sub.add_parser("rules", help="List the risk classes and their points."))
 
-    c = sub.add_parser("check", help="Verify a diff range.")
+    c = _root_too(sub.add_parser("check", help="Verify a diff range."))
     c.add_argument("--base", default=None,
                    help="Base ref (default: auto-detect — origin/HEAD, then "
                         "main, master, origin/main, origin/master; the "

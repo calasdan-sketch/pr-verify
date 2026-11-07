@@ -17,8 +17,13 @@ Stdlib only, Python 3.10+, needs the `git` command line tool on PATH.
 
 ```bash
 pip install git+https://github.com/calasdan-sketch/pr-verify
+pr-verify --version      # pr-verify 0.3.0
 pr-verify check
 ```
+
+(`pip install pr-verify` from PyPI gives 0.1.0 as of 2026-11-07, which is
+much older than this page describes: use the line above until 0.3.0 is
+published there.)
 
 Or run from a checkout without installing: `python3 -m pr_verify` from the
 repo root.
@@ -97,7 +102,9 @@ round (Mergify's docs page failed to load): treat any claim about them as
 unverified. Open-source scanners that do one slice of the risk classes
 (detect-secrets, bandit, zizmor) are run in `benchmarks/competitors.py`.
 
-Git AI's product page now says its attributions "carry through rebases,
+Git AI's page now carries the banner "Git AI is now part of OpenAI" (read
+2026-11-07); what that means for its licence or roadmap was not checked.
+Its product page now says its attributions "carry through rebases,
 squashes, and cherry-picks" (read 2026-11-07); an older third-party page
 ([source](https://deepwiki.com/acunniffe/git-ai/13-limitations-and-future-work))
 described them as only partly kept through the squash merges a host does on
@@ -771,7 +778,11 @@ compares, so the output below cannot drift from the code:
 
 ## Windows
 
-Works on Windows 11 / Python 3.11: git output is decoded as UTF-8 (paths
+The code is written for Windows and the CI matrix lists it, but the
+2026-11 review of this repo could only read the Windows paths (path
+separators, temp files, console encoding, PATHEXT, closed pipes), not run
+them: if something breaks there, that is the first place to look. What the
+code does: git output is decoded as UTF-8 (paths
 included), the report survives a cp1252 console (unencodable marks are
 replaced instead of crashing), gate commands are split with Windows rules
 and their executables resolved through `PATHEXT`, and the test suite uses

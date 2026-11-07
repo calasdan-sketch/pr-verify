@@ -2,6 +2,28 @@
 
 ## 0.3.0 (unreleased)
 
+Round 4: the stranger's first hour (built wheel installed in a fresh
+environment, README commands run from it). Details: `docs/ROUND4.md`.
+
+Fixed
+
+- A pull request that adds a file whose name is not UTF-8 (`caf<0xE9>.py`)
+  stopped the whole run with `git blame ... fatal: no such path`, exit 2.
+  The byte is now kept, `git blame` finds the file, and the name is shown as
+  `caf\xe9.py` (human, Markdown, JSON) or `caf%E9.py` (SARIF URI). JSON and
+  SARIF never contain a lone surrogate, which strict parsers reject.
+- `pr-verify check --root PATH` (the option after the subcommand) was
+  "unrecognized arguments"; it now works for `init`, `rules` and `check`.
+
+Changed
+
+- The version lives in `pr_verify.__version__` (cli.VERSION reads it); a test
+  keeps it equal to pyproject.toml and the top CHANGELOG heading.
+- Package metadata: author, Source and Changelog links, Git topic classifier.
+- README: the install section says what PyPI has today (0.1.0), the Git AI
+  row notes its "now part of OpenAI" banner, the Windows section says plainly
+  that it was reviewed by reading, not run.
+
 Expert round 3: attacking the scanner. Panel: a hostile PR author, a
 performance engineer, a code-scanning (SARIF) consumer, an engineering
 manager using only the README, a docs/DX lead, a competitor's engineer.
