@@ -71,7 +71,7 @@ from fixture import (FAIL_GATE, PY, commit_as, commit_at_new_base, git,
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 AGENT = ("claude-bot", "claude-bot@example.com")
-HUMAN = ("Dan Calas", "dan@example.com")
+HUMAN = ("Alex Dev", "alex@example.com")
 
 
 def _read(name: str) -> str:
@@ -1220,7 +1220,9 @@ class TestSourceDistribution(unittest.TestCase):
     def test_every_module_under_tests_goes_in(self):
         # tests/fixture.py (imported by nine modules) and tests/__init__.py
         # are not called test*.py
-        self.assertIn(["recursive-include", "tests", "*.py"], self.manifest())
+        # (Round 5 added the golden files' extensions after *.py)
+        self.assertTrue(any(a[:3] == ["recursive-include", "tests", "*.py"]
+                            and "*.sarif" in a for a in self.manifest()))
         for name in ("fixture.py", "__init__.py"):
             self.assertTrue(os.path.isfile(os.path.join(REPO, "tests", name)))
 

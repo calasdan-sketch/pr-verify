@@ -1,0 +1,36 @@
+════════════════════════════════════════════════════════
+  PR VERIFY  risk 57/100 (MEDIUM)
+════════════════════════════════════════════════════════
+
+  base: <sha40>
+
+  provenance: 9/13 added lines agent-authored
+    agent   app/auth.py (4/4 agent) [claude-bot (claude)]
+    mixed   app/core.py (4/8 agent) [claude-bot (claude)]
+    agent   app/views.py (1/1 agent) [claude-bot (claude)]
+
+  blast radius:
+    app/core.py: 1 downstream dependent(s)
+      direct: app/views.py
+    app/auth.py: 0 downstream dependent(s)
+    app/views.py: 0 downstream dependent(s)
+
+  gates:
+    none configured
+
+  review plan: standard, at least 1 reviewer(s)
+    read first: app/core.py:7-10  [agent_written] 4 line(s) written by an agent; 1 dependent(s)
+    read first: app/auth.py:3-6  [agent_written] 4 line(s) written by an agent
+    read first: app/views.py:1  [agent_written] 1 line(s) written by an agent
+
+  risk factors:
+     28 pts  agent_share  9/13 added lines agent-authored (69%)
+      4 pts  blast        largest blast radius: 1 downstream dependent(s)
+     20 pts  sensitive    sensitive files touched: app/auth.py
+      0 pts  gates        no gates configured
+      5 pts  no_tests     source changed with no test changes
+      0 pts  deletion     no agent-attributed deletions
+      0 pts  risk_classes no risk class found in the changed lines
+
+  ✓ score 57 < min-score 70
+════════════════════════════════════════════════════════

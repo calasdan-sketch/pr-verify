@@ -57,7 +57,7 @@ def commit(tmp, who, msg, files, committer=None):
                    capture_output=True)
 
 
-H = ("Dan Calas", "dan@example.com")
+H = ("Alex Dev", "alex@example.com")
 HUMAN2 = ("Sam Lee", "sam@example.com")
 CLAUDE_CODE_TRAILER = "\n\nCo-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
 AGENTS = {
@@ -69,7 +69,7 @@ AGENTS = {
     "cursor agent": (("Cursor Agent", "cursoragent@cursor.com"), "work"),
     "devin": (("devin-ai-integration[bot]", "158243242+devin-ai-integration[bot]@users.noreply.github.com"), "work"),
     "jules": (("google-labs-jules[bot]", "161369871+google-labs-jules[bot]@users.noreply.github.com"), "work"),
-    "aider tag": (("Dan Calas (aider)", "dan@example.com"), "work"),
+    "aider tag": (("Alex Dev (aider)", "alex@example.com"), "work"),
     "aider subject prefix": (H, "aider: work"),
     "openhands": (("openhands", "openhands@all-hands.dev"), "work"),
     "claude-session trailer": (H, "work\n\nClaude-Session: https://claude.ai/code/session_x"),

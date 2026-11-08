@@ -333,7 +333,7 @@ def make_label_repo() -> tuple[str, str]:
     """
     tmp = tempfile.mkdtemp()
     git(tmp, "init", "-qb", "main")
-    commit_as(tmp, "Dan Calas", "dan@example.com", "base", {
+    commit_as(tmp, "Alex Dev", "alex@example.com", "base", {
         ".gitignore": "*.log\n",
         "README.md": "# hi\n",
         "config.yaml": "a: 1\n",
@@ -468,7 +468,7 @@ class TestWorktreeLabel(unittest.TestCase):
         # every file that does `import config` a "dependent"
         tmp = tempfile.mkdtemp()
         git(tmp, "init", "-qb", "main")
-        commit_as(tmp, "Dan Calas", "dan@example.com", "base", {
+        commit_as(tmp, "Alex Dev", "alex@example.com", "base", {
             "config.py": "DEBUG = False\n", "config.yaml": "a: 1\n",
             "app/main.py": "import config\n"})
         base = _sha(tmp)
@@ -511,7 +511,7 @@ class TestWorktreeLabel(unittest.TestCase):
     def test_renamed_file_is_in_the_graph(self):
         tmp = tempfile.mkdtemp()
         git(tmp, "init", "-qb", "main")
-        commit_as(tmp, "Dan Calas", "dan@example.com", "base",
+        commit_as(tmp, "Alex Dev", "alex@example.com", "base",
                   {"app/old_name.py": "def old():\n    return 1\n" * 4})
         base = _sha(tmp)
         git(tmp, "mv", "app/old_name.py", "app/new_name.py")
@@ -550,7 +550,7 @@ def _range_with_commit(name, email, message, files, base_files=None):
     -- the shape of an agent PR."""
     tmp = tempfile.mkdtemp()
     git(tmp, "init", "-qb", "main")
-    commit_as(tmp, "Dan Calas", "dan@example.com", "base",
+    commit_as(tmp, "Alex Dev", "alex@example.com", "base",
               base_files or {"app/a.py": "x = 1\n"})
     base = _sha(tmp)
     commit_as(tmp, name, email, message, files)
@@ -591,7 +591,7 @@ class TestForgedCommitRecords(unittest.TestCase):
 
     def test_separator_in_the_body_cannot_hide_the_trailer(self):
         message = "Add feature\n\nnotes\x1e\n\n" + AGENT_TRAILER
-        tmp, head, fp = self._analyzed("Dan Calas", "dan@example.com",
+        tmp, head, fp = self._analyzed("Alex Dev", "alex@example.com",
                                        message)
         self.assertIn(AGENT_TRAILER, pv._commit_text(tmp, {head})[head][3])
         self.assertEqual((fp.label(), fp.agent_added, fp.added),
@@ -617,7 +617,7 @@ class TestForgedCommitRecords(unittest.TestCase):
         a, b, c = "a" * 40, "b" * 40, "c" * 40
 
         def rec(sha, body="body"):
-            return "\x00".join([sha, "Dan", "dan@example.com", "subject",
+            return "\x00".join([sha, "Alex", "alex@example.com", "subject",
                                 body]) + "\x00\n"
 
         good = rec(a) + rec(b)
@@ -638,7 +638,7 @@ class TestForgedCommitRecords(unittest.TestCase):
         with mock.patch.object(pv, "_git", return_value=good):
             texts = pv._commit_text("ignored", {a, b})
         self.assertEqual(texts[a],
-                         ("Dan", "dan@example.com", "subject", "body"))
+                         ("Alex", "alex@example.com", "subject", "body"))
         self.assertEqual(set(texts), {a, b})
 
     def test_a_file_named_like_a_commit_does_not_break_the_lookup(self):
@@ -653,7 +653,7 @@ class TestForgedCommitRecords(unittest.TestCase):
         # "gpg: ...<sha>", the record was lost and the commit read as human
         tmp = tempfile.mkdtemp()
         git(tmp, "init", "-qb", "main")
-        commit_as(tmp, "Dan Calas", "dan@example.com", "base",
+        commit_as(tmp, "Alex Dev", "alex@example.com", "base",
                   {"app/a.py": "x = 1\n", "app/old.py": "y = 1\n"})
         base = _sha(tmp)
         os.remove(os.path.join(tmp, "app/old.py"))
@@ -682,10 +682,10 @@ class TestForgedFileContent(unittest.TestCase):
     def test_line_break_cannot_forge_a_blame_header(self):
         tmp = tempfile.mkdtemp()
         git(tmp, "init", "-qb", "main")
-        commit_as(tmp, "Dan Calas", "dan@example.com", "base",
+        commit_as(tmp, "Alex Dev", "alex@example.com", "base",
                   {"README.md": "hi\n"})
         base = _sha(tmp)
-        commit_as(tmp, "Dan Calas", "dan@example.com", "human tweak",
+        commit_as(tmp, "Alex Dev", "alex@example.com", "human tweak",
                   {"docs.txt": "h\n"})
         human = _sha(tmp)
         # line 1 smuggles "<human sha> 1 2 1": a blame header that would
@@ -747,7 +747,7 @@ class TestForgedFileContent(unittest.TestCase):
         names = ["app/a\u2028b.py", "app/c\u2029d.py"]
         tmp = tempfile.mkdtemp()
         git(tmp, "init", "-qb", "main")
-        commit_as(tmp, "Dan Calas", "dan@example.com", "base",
+        commit_as(tmp, "Alex Dev", "alex@example.com", "base",
                   {n: "x = 1\n" for n in names})
         base = _sha(tmp)
         for n in names:
@@ -770,7 +770,7 @@ class TestTrailerLineBreaks(unittest.TestCase):
     str.splitlines() and counted as no agent at all."""
 
     def _match(self, body):
-        return markers_mod.match("Dan Calas", "dan@example.com", "Add", body,
+        return markers_mod.match("Alex Dev", "alex@example.com", "Add", body,
                                  AGENT_MARKERS)
 
     def test_odd_whitespace_after_the_key_does_not_hide_a_trailer(self):
@@ -783,7 +783,7 @@ class TestTrailerLineBreaks(unittest.TestCase):
         for body in ("Add\n\n" + AGENT_TRAILER,
                      "Add\r\n\r\n" + AGENT_TRAILER + "\r\n",
                      AGENT_TRAILER,
-                     "Add\n\nSigned-off-by: Dan <d@example.com>\n"
+                     "Add\n\nSigned-off-by: Alex <d@example.com>\n"
                      + AGENT_TRAILER + "\nmore text\n"):
             with self.subTest(body=body):
                 self.assertEqual(self._match(body), "claude")
@@ -792,7 +792,7 @@ class TestTrailerLineBreaks(unittest.TestCase):
     def test_end_to_end_with_a_real_commit(self):
         message = "Add feature\n\nCo-Authored-By:\x1e Claude <noreply@anthropic.com>"
         tmp, base = _range_with_commit(
-            "Dan Calas", "dan@example.com", message,
+            "Alex Dev", "alex@example.com", message,
             {"app/a.py": "x = 1\ny = 2\n"})
         fp = pv.analyze(tmp, base, "HEAD", AGENT_MARKERS)["app/a.py"]
         self.assertEqual((fp.label(), fp.agent_added), ("agent", 1))
@@ -1026,7 +1026,7 @@ def _attr_repo(attributes, attributes_path=".gitattributes", where=None):
     git(tmp, "init", "-qb", "main")
     with open(os.path.join(tmp, "logo.png"), "wb") as f:
         f.write(PNG)
-    commit_as(tmp, "Dan Calas", "dan@example.com", "base",
+    commit_as(tmp, "Alex Dev", "alex@example.com", "base",
               {"app/a.py": "x = 1\n"})
     base = _sha(tmp)
     with open(os.path.join(tmp, "logo.png"), "wb") as f:
@@ -1162,7 +1162,7 @@ def _shape_repo():
     tmp = tempfile.mkdtemp()
     git(tmp, "init", "-qb", "main")
     ten = "".join(f"line {i}\n" for i in range(10))
-    commit_as(tmp, "Dan Calas", "dan@example.com", "base",
+    commit_as(tmp, "Alex Dev", "alex@example.com", "base",
               {"app/a.py": "a\nb\nc\nd\ne\nf\n",
                "app/blank.py": "x\n\ny\nz\n",
                "b/c.py": "q = 1\n",
@@ -1226,7 +1226,7 @@ class TestUserConfigDoesNotShapeTheDiff(unittest.TestCase):
                 os.makedirs(os.path.join(tmp, "vendor", "lib"))
                 git(tmp, "update-index", "--add", "--cacheinfo",
                     f"160000,{'1' * 40},vendor/lib")
-                commit_as(tmp, "Dan Calas", "dan@example.com", "base",
+                commit_as(tmp, "Alex Dev", "alex@example.com", "base",
                           {"app/a.py": "x = 1\n"})
                 base = _sha(tmp)
                 git(tmp, "update-index", "--cacheinfo",
@@ -1282,7 +1282,7 @@ class TestBlameIgnoreRevs(unittest.TestCase):
     def test_a_commit_the_pr_lists_still_owns_its_lines(self):
         tmp = tempfile.mkdtemp()
         git(tmp, "init", "-qb", "main")
-        commit_as(tmp, "Dan Calas", "dan@example.com", "base",
+        commit_as(tmp, "Alex Dev", "alex@example.com", "base",
                   {"app/a.py": "def f():\n    return 1\n",
                    ".git-blame-ignore-revs": "# none\n"})
         base = _sha(tmp)
@@ -1291,7 +1291,7 @@ class TestBlameIgnoreRevs(unittest.TestCase):
                   {"app/a.py": "def f():\n    return 2\n"})
         agent = _sha(tmp)
         git(tmp, "config", "blame.ignoreRevsFile", ".git-blame-ignore-revs")
-        commit_as(tmp, "Dan Calas", "dan@example.com", "tidy",
+        commit_as(tmp, "Alex Dev", "alex@example.com", "tidy",
                   {".git-blame-ignore-revs": f"# none\n{agent}\n"})
         got = pv.analyze(tmp, base, "HEAD", ["claude"])["app/a.py"]
         self.assertEqual((got.added, got.agent_added), (1, 1))
@@ -1569,7 +1569,7 @@ class TestNothingToVerifyJson(unittest.TestCase):
 
     def test_no_gate_runs_when_there_is_nothing_to_verify(self):
         tmp, base = make_pr_repo()
-        commit_as(tmp, "Dan Calas", "dan@example.com", "gate",
+        commit_as(tmp, "Alex Dev", "alex@example.com", "gate",
                   {".pr-verify.yaml": f"gates:\n  - {yaml_str(FAIL_GATE)}\n"})
         code, doc = _json("--root", tmp, "check", "--base", "HEAD")
         self.assertEqual((code, doc["gates"]), (0, []))
@@ -1756,7 +1756,7 @@ class TestTerminalSafety(unittest.TestCase):
         new = "new" + ESC + "[2J\n::warning::y.txt"
         tmp = tempfile.mkdtemp()
         git(tmp, "init", "-qb", "main")
-        commit_as(tmp, "Dan Calas", "dan@example.com", "base",
+        commit_as(tmp, "Alex Dev", "alex@example.com", "base",
                   {gone: "g = 1\n", "app/keep.py": "k = 1\n"})
         base = _sha(tmp)
         os.remove(os.path.join(tmp, gone))

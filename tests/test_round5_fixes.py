@@ -57,7 +57,7 @@ from fixture import (PY, commit_as, commit_at_new_base, git, make_pr_repo)
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 AGENT = ("claude-bot", "claude-bot@example.com")
-HUMAN = ("Dan Calas", "dan@example.com")
+HUMAN = ("Alex Dev", "alex@example.com")
 
 
 def _read(name: str) -> str:
@@ -234,25 +234,25 @@ NOT_AGENT = {
     "an Anthropic employee, no trailer":
         ("Alice Smith", "alice@anthropic.com", "Fix the build", ""),
     "an Anthropic employee as co-author":
-        ("Dan Calas", "dan@example.com", "Fix",
+        ("Alex Dev", "alex@example.com", "Fix",
          "Co-Authored-By: Alice Smith <alice@anthropic.com>"),
     "the address in prose":
-        ("Dan Calas", "dan@example.com", "Fix",
+        ("Alex Dev", "alex@example.com", "Fix",
          "Paired with Claude Sonnet 5.5 <noreply@anthropic.com> on this."),
     "the address in a sentence":
-        ("Dan Calas", "dan@example.com", "Fix",
+        ("Alex Dev", "alex@example.com", "Fix",
          "Questions: write to noreply@anthropic.com"),
     "a look-alike domain":
-        ("Dan Calas", "dan@example.com", "Fix",
+        ("Alex Dev", "alex@example.com", "Fix",
          "Co-Authored-By: Alice Smith <noreply@anthropic.com.example.org>"),
     "a look-alike local part":
-        ("Dan Calas", "dan@example.com", "Fix",
+        ("Alex Dev", "alex@example.com", "Fix",
          "Co-Authored-By: Alice Smith <no-reply@anthropic.com>"),
     "generated-with in prose":
-        ("Dan Calas", "dan@example.com", "Fix",
+        ("Alex Dev", "alex@example.com", "Fix",
          "I generated this with [Claude Code] yesterday, then rewrote it."),
     "generated-with in the subject":
-        ("Dan Calas", "dan@example.com",
+        ("Alex Dev", "alex@example.com",
          ROBOT + " Generated with [Claude Code]", ""),
     "a human called Claude Sonnet":
         ("Claude Sonnet", "cs@example.com", "Fix", ""),
@@ -276,21 +276,21 @@ class TestClaudeCodeTrailer(unittest.TestCase):
             with self.subTest(label):
                 body = f"Adds the thing.\n\n{trailer}"
                 self.assertIsNotNone(
-                    self._match("Dan Calas", "dan@example.com", "Add", body))
+                    self._match("Alex Dev", "alex@example.com", "Add", body))
 
     def test_the_footer_and_the_session_trailer_are_agents(self):
         for label, line in CLAUDE_FOOTERS.items():
             with self.subTest(label):
                 body = f"Adds the thing.\n\n{line}\n"
                 self.assertIsNotNone(
-                    self._match("Dan Calas", "dan@example.com", "Add", body))
+                    self._match("Alex Dev", "alex@example.com", "Add", body))
 
     def test_the_whole_message_as_claude_code_writes_it(self):
         body = ("Add the thing\n\n" + CLAUDE_FOOTERS["generated with"] + "\n\n"
                 + CLAUDE_TRAILERS["current model"] + "\n"
                 + CLAUDE_FOOTERS["session trailer"])
         self.assertIsNotNone(
-            self._match("Dan Calas", "dan@example.com", "Add the thing", body))
+            self._match("Alex Dev", "alex@example.com", "Add the thing", body))
 
     def test_mentions_and_look_alikes_stay_human(self):
         for label, (name, email, subject, body) in NOT_AGENT.items():
@@ -312,17 +312,17 @@ class TestClaudeCodeTrailer(unittest.TestCase):
         # author's own address
         self.assertEqual(markers_mod.match("Bot Two", "noreply@anthropic.com",
                                            "Fix", "", [marker]), marker)
-        self.assertIsNone(markers_mod.match("Dan", "dan@anthropic.com",
+        self.assertIsNone(markers_mod.match("Alex", "dan@anthropic.com",
                                             "Fix", "", [marker]))
         self.assertIsNone(markers_mod.match(
-            "Dan", "dan@example.com", "noreply anthropic com: fix", "",
+            "Alex", "alex@example.com", "noreply anthropic com: fix", "",
             [marker]))
 
     def test_the_label_names_the_marker_that_matched(self):
-        hit = self._match("Dan Calas", "dan@example.com", "Add",
+        hit = self._match("Alex Dev", "alex@example.com", "Add",
                           CLAUDE_TRAILERS["current model"])
         self.assertEqual(hit, "co-authored-by: noreply@anthropic.com")
-        hit = self._match("Dan Calas", "dan@example.com", "Add",
+        hit = self._match("Alex Dev", "alex@example.com", "Add",
                           CLAUDE_FOOTERS["generated with"])
         self.assertEqual(hit, "claude code")
 

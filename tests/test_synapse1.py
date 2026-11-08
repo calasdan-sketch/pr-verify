@@ -106,7 +106,7 @@ def hostile_repo():
     authored by a bot whose name is Markdown too."""
     tmp = tempfile.mkdtemp(prefix="prv-s1-")
     git(tmp, "init", "-qb", "main")
-    commit_as(tmp, "Dan Calas", "dan@example.com", "base",
+    commit_as(tmp, "Alex Dev", "alex@example.com", "base",
               {"app/core.py": "x = 1\n"})
     git(tmp, "branch", "base")
     files = {}
@@ -230,7 +230,7 @@ class TestMarkdownReport(unittest.TestCase):
     def test_a_huge_pr_stays_under_the_limit(self):
         tmp = tempfile.mkdtemp(prefix="prv-s1-")
         git(tmp, "init", "-qb", "main")
-        commit_as(tmp, "Dan Calas", "dan@example.com", "base",
+        commit_as(tmp, "Alex Dev", "alex@example.com", "base",
                   {"seed.txt": "x\n"})
         git(tmp, "branch", "base")
         files = {f"pkg/{'d' * 40}/{i:04d}_{'n' * 60}.txt": "y\n"
@@ -276,7 +276,7 @@ class TestNoSectionCanBeBlanked(unittest.TestCase):
     def test_file_names_that_grow_when_escaped(self):
         tmp = tempfile.mkdtemp(prefix="prv-s1-")
         git(tmp, "init", "-qb", "main")
-        commit_as(tmp, "Dan Calas", "dan@example.com", "base",
+        commit_as(tmp, "Alex Dev", "alex@example.com", "base",
                   {"seed.txt": "x\n"})
         git(tmp, "branch", "base")
         files = {f"f{i:03d}" + "`" * 150 + ".md": "y\n" for i in range(150)}
@@ -543,25 +543,25 @@ class TestCopilotAgentTrailer(unittest.TestCase):
     def test_agent_logs_url_names_copilot(self):
         body = ("Fix the parser\n\nAgent-Logs-Url: "
                 "https://github.com/o/r/sessions/0000\n"
-                "Co-authored-by: Dan Calas <dan@example.com>\n")
-        self.assertEqual(markers_mod.match("Dan Calas", "dan@example.com",
+                "Co-authored-by: Alex Dev <alex@example.com>\n")
+        self.assertEqual(markers_mod.match("Alex Dev", "alex@example.com",
                                            "Fix the parser", body,
                                            self.MARKERS), "copilot")
 
     def test_only_as_a_trailer_line(self):
         body = "See the Agent-Logs-Url: field of the other tool\n"
-        self.assertIsNone(markers_mod.match("Dan Calas", "dan@example.com",
+        self.assertIsNone(markers_mod.match("Alex Dev", "alex@example.com",
                                             "notes", body, self.MARKERS))
 
     def test_end_to_end(self):
         tmp, base = make_pr_repo()
-        commit_as(tmp, "Dan Calas", "dan@example.com",
+        commit_as(tmp, "Alex Dev", "alex@example.com",
                   "Add helper\n\nAgent-Logs-Url: https://github.com/o/r/x\n",
                   {"app/helper.py": "def h():\n    return 1\n"})
         _, out, _ = main("--root", tmp, "check", "--base", base,
                          "--format", "json", "--skip-gates")
         self.assertEqual(json.loads(out)["files"]["app/helper.py"]["agents"],
-                         ["Dan Calas (copilot)"])
+                         ["Alex Dev (copilot)"])
 
 
 class TestDocs(unittest.TestCase):

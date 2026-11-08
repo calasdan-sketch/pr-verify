@@ -101,6 +101,7 @@ def build(version: str, findings: list, violations: list, agent_lines: dict | No
         "$schema": SCHEMA, "version": "2.1.0",
         "runs": [{"tool": {"driver": {
             "name": "pr-verify", "version": version,
+            "organization": "Calas Automations Inc.",
             "informationUri": "https://github.com/calasdan-sketch/pr-verify",
             "rules": rules}}, "results": results}],
     }

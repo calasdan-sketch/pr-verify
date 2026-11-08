@@ -17,11 +17,14 @@ argv without any splitting.
 
 from __future__ import annotations
 
+import collections
 import dataclasses
 import os
+import re
 import shlex
 import shutil
 import subprocess
+import threading
 
 
 @dataclasses.dataclass
@@ -71,9 +74,110 @@ def display(cmd: str | list[str]) -> str:
     return cmd
 
 
-def run_gates(root: str, commands: list,
-              timeout: int = 300) -> list[GateResult]:
+#: Environment variables a gate does not inherit: anything whose name says it
+#: holds a token, a secret, a password, a credential, a key or an auth
+#: socket (GITHUB_TOKEN, ACTIONS_RUNTIME_TOKEN, AWS_SECRET_ACCESS_KEY,
+#: NPM_TOKEN, SSH_AUTH_SOCK ...). A gate runs the pull request's own code
+#: (a test file is code), so whatever is in its environment is readable by
+#: the PR. `gate_env_pass` in the config lets a named variable through.
+_SECRET_NAME = re.compile(
+    r"TOKEN(?!IZERS)|SECRET|PASSW|CREDENTIAL|PRIVATE_?KEY|API_?KEY|"
+    r"ACCESS_?KEY|SESSION_?KEY|(^|_)AUTH(_|$)|_KEY$|^KEY$|BEARER|COOKIE|"
+    r"AUTHORIZATION", re.IGNORECASE)
+
+#: How much of a gate's output is kept while it runs (the report shows the
+#: last 2,000 characters). A test run that prints gigabytes costs this much.
+_TAIL_BYTES = 64 * 1024
+OUTPUT_TAIL_CHARS = 2000
+
+
+def gate_env(passthrough=(), environ=None) -> dict:
+    """The environment a gate runs in: the current one without the variables
+    whose names look like secrets (see _SECRET_NAME), except those named in
+    `passthrough` (compared without regard to case)."""
+    env = os.environ if environ is None else environ
+    keep = {str(n).casefold() for n in passthrough or ()}
+    return {k: v for k, v in env.items()
+            if k.casefold() in keep or not _SECRET_NAME.search(k)}
+
+
+def stripped_names(passthrough=(), environ=None) -> list[str]:
+    """Names of the variables gate_env leaves out, sorted."""
+    env = os.environ if environ is None else environ
+    kept = gate_env(passthrough, env)
+    return sorted(k for k in env if k not in kept)
+
+
+def _kill_tree(proc) -> None:
+    """Kill the gate and what it started (its process group on POSIX,
+    taskkill /T on Windows); never raises."""
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=15)
+        else:
+            import signal
+            os.killpg(proc.pid, signal.SIGKILL)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
+def _run_one(argv, root, timeout, env):
+    """(returncode, tail text, timed_out). stdout and stderr share one pipe,
+    so their lines stay in the order the gate wrote them; only the last
+    _TAIL_BYTES are kept, so a gate that prints without end cannot fill
+    memory. A timeout kills the whole process group (POSIX) / tree (Windows),
+    so a grandchild that holds the pipe cannot make the run outlive it."""
+    kwargs = {}
+    if os.name != "nt":
+        kwargs["start_new_session"] = True
+    proc = subprocess.Popen(
+        argv, shell=False, cwd=root, env=env, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **kwargs)
+    chunks: collections.deque = collections.deque()
+    size = 0
+
+    def pump():
+        nonlocal size
+        try:
+            while True:
+                data = proc.stdout.read1(65536)
+                if not data:
+                    return
+                chunks.append(data)
+                size += len(data)
+                while size - len(chunks[0]) >= _TAIL_BYTES:
+                    size -= len(chunks.popleft())
+        except (OSError, ValueError):
+            return
+
+    reader = threading.Thread(target=pump, daemon=True)
+    reader.start()
+    timed_out = False
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        _kill_tree(proc)
+        proc.wait()
+    reader.join(timeout=5)
+    if reader.is_alive():
+        try:
+            proc.stdout.close()
+        except OSError:
+            pass
+    text = b"".join(chunks)[-_TAIL_BYTES:].decode("utf-8", errors="replace")
+    return (-1 if timed_out else proc.returncode), text[-OUTPUT_TAIL_CHARS:], timed_out
+
+
+def run_gates(root: str, commands: list, timeout: int = 300,
+              env_pass=()) -> list[GateResult]:
     results: list[GateResult] = []
+    env = gate_env(env_pass)
     for cmd in commands:
         if not cmd or (isinstance(cmd, str) and not cmd.strip()):
             continue
@@ -88,26 +192,10 @@ def run_gates(root: str, commands: list,
             continue
         shown = display(cmd)
         try:
-            p = subprocess.run(argv, shell=False, cwd=root,
-                               capture_output=True, text=True,
-                               encoding="utf-8", errors="replace",
-                               timeout=timeout)
-            tail = (p.stdout + p.stderr)[-2000:]
+            rc, tail, timed_out = _run_one(argv, root, timeout, env)
             results.append(GateResult(
-                command=shown, passed=p.returncode == 0,
-                returncode=p.returncode, output_tail=tail))
-        except subprocess.TimeoutExpired as e:
-            out = ""
-            if e.stdout:
-                out += e.stdout.decode(errors="replace") \
-                    if isinstance(e.stdout, bytes) else e.stdout
-            if e.stderr:
-                err = e.stderr.decode(errors="replace") \
-                    if isinstance(e.stderr, bytes) else e.stderr
-                out += err
-            results.append(GateResult(
-                command=shown, passed=False, returncode=-1,
-                output_tail=out[-2000:], timed_out=True))
+                command=shown, passed=(rc == 0 and not timed_out),
+                returncode=rc, output_tail=tail, timed_out=timed_out))
         except (OSError, ValueError) as e:
             # argv[0] not found / not executable: a failed gate, not a crash.
             results.append(GateResult(

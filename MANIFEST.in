@@ -5,5 +5,5 @@
 include .github/workflows/ci.yml
 include action.yml
 include run_action.py
-recursive-include tests *.py
+recursive-include tests *.py *.txt *.json *.md *.sarif
 include CHANGELOG.md

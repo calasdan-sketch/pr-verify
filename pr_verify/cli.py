@@ -643,7 +643,8 @@ def run_check(args) -> CheckResult:
     plan: dict = {}
     if prov:
         blast = br_mod.analyze(root, list(prov.keys()))
-        gate_results = (gates_mod.run_gates(root, cfg["gates"], cfg["timeout"])
+        gate_results = (gates_mod.run_gates(root, cfg["gates"], cfg["timeout"],
+                                         cfg["gate_env_pass"])
                         if not args.skip_gates else [])
         added_t, removed_t = prov_mod.patch_text(root, diff_base, head_sha)
         added_t = {k: v for k, v in added_t.items()
@@ -835,6 +836,8 @@ class _Parser(argparse.ArgumentParser):
 
 def build_parser() -> argparse.ArgumentParser:
     p = _Parser(prog="pr-verify", description=__doc__,
+                epilog="pr-verify is maintained by Calas Automations Inc. "
+                       "(MIT licence).",
                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     p.add_argument("--root", default=os.getcwd(),

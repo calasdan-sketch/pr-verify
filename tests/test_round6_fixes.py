@@ -59,8 +59,8 @@ from fixture import commit_as, git
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 AGENT = ("claude-bot", "claude-bot@example.com")
-HUMAN = ("Dan Calas", "dan@example.com")
-IDENTITY = ("-c", "user.name=Dan Calas", "-c", "user.email=dan@example.com")
+HUMAN = ("Alex Dev", "alex@example.com")
+IDENTITY = ("-c", "user.name=Alex Dev", "-c", "user.email=alex@example.com")
 
 _TEMP_DIRS: list[str] = []
 

@@ -105,7 +105,7 @@ unverified. Open-source scanners that do one slice of the risk classes
 Git AI's page now carries the banner "Git AI is now part of OpenAI" (read
 2026-11-07); what that means for its licence or roadmap was not checked.
 Its product page now says its attributions "carry through rebases,
-squashes, and cherry-picks" (read 2026-11-07); an older third-party page
+squashes, and cherry-picks" (read 2026-11-07, unchanged 2026-11-08); an older third-party page
 ([source](https://deepwiki.com/acunniffe/git-ai/13-limitations-and-future-work))
 described them as only partly kept through the squash merges a host does on
 its server and lost through renames. Which is current was not tested here:
@@ -234,7 +234,7 @@ of its commits (the human lines are credited to the agent).
 **Provenance** — every added line labeled agent/human via `git blame` +
 commit-author analysis. Per file: `agent` / `mixed` / `human`, with the
 detected identities shown as `author (marker)` — e.g. `[claude-bot
-(claude)]` or `[Dan Calas (aider)]` — so you can see *why* a line counts
+(claude)]` or `[Alex Dev (aider)]` — so you can see *why* a line counts
 as agent-written.
 
 **Removed lines count as changed lines.** A line the PR takes out of a file
@@ -266,11 +266,14 @@ prose:
   handle: `claude-bot`, `Claude`, `copilot-swe-agent`) matches on any
   word; a human-shaped "First Last" name only matches a marker covering
   the whole name (`Claude Code`) or a bracketed/parenthesised tag
-  (`dependabot[bot]`, `Dan Calas (aider)`). So **Tim Abbott, Claude Dupont
+  (`dependabot[bot]`, `Alex Dev (aider)`). So **Tim Abbott, Claude Dupont
   and Cody Smith are humans**; "bot" matches the word `bot`, not `Abbott`;
 - the author email — whole local part (`cody@…`), a hyphen/underscore word
   of it (`claude-bot@…`; dots join `first.last` names and are not split),
-  or a domain label (`…@aider.chat`, `…@cursor.com`);
+  or a domain label (`…@aider.chat`, `…@cursor.com`). GitHub's address for
+  an app account, `ID+name[bot]@users.noreply.github.com`, always counts
+  (the `[bot]` suffix exists only on GitHub Apps), even when the display
+  name looks like a person ("Devin AI");
 - `Co-Authored-By:` / `Generated-by:` / `Signed-off-by:` trailers in the
   body, matched by the same rules (`Co-Authored-By: Claude
   <noreply@anthropic.com>`). Two lines Claude Code leaves count as well:
@@ -438,6 +441,17 @@ the last 8 lines of the gate's output are printed under it (`| AssertionError:
 failure without a rerun (the JSON has the last 2,000 characters in
 `gates[].output_tail`).
 
+A gate runs the pull request's own code (a test file is code), so it is run
+with care. It does not inherit environment variables whose names look like
+secrets (`GITHUB_TOKEN`, `NPM_TOKEN`, `AWS_SECRET_ACCESS_KEY`, anything with
+TOKEN, SECRET, PASSWORD, CREDENTIAL, API_KEY, `_KEY` or AUTH in the name);
+name the ones a gate really needs under `gate_env_pass: [NPM_TOKEN]`. It
+gets no standard input. Only its last 64 KB of output is kept while it runs
+(a test run that prints gigabytes costs a few megabytes), and a timeout
+kills the gate and the processes it started (POSIX process group; on Windows
+`taskkill /T`, written but not run). This is not a sandbox: the gate still
+runs as you, with your files and network.
+
 **Risk score** — deterministic 0–100 from six public factors:
 
 | Factor | Max | What it measures |
@@ -540,7 +554,7 @@ file that is not a mapping of settings, a bare list for one. Each is exit 2
 with one `error:` line that names the file and, for a YAML problem, the line.
 
 The settings are `agent_markers`, `sensitive_paths`, `gates`,
-`risk_threshold`, `timeout`, and `extra_agent_markers` and
+`gate_env_pass`, `risk_threshold`, `timeout`, and `extra_agent_markers` and
 `extra_sensitive_paths`, which are added to the first two (in that order;
 an entry already there is not repeated). A key that is none of them is not an error
 (a file that works keeps working), but it does nothing, and a `gate:` that
@@ -617,7 +631,9 @@ default branch is `main`; pin to it (or to a tag once one exists):
 
 ```yaml
 - uses: actions/checkout@v4
-  with: { fetch-depth: 0 }
+  with:
+    fetch-depth: 0              # blame and the merge base need the history
+    persist-credentials: false  # the PR's code (gates) must not find the token in .git/config
 - uses: calasdan-sketch/pr-verify@main
   with:
     base: origin/main      # --base (empty = auto-detect; be explicit in CI)
@@ -817,3 +833,7 @@ runs the suite on Ubuntu, Windows and macOS with Python 3.11, 3.12 and
 3.13, and on Python 3.10 (the oldest supported) on Ubuntu. That floor
 matters: argparse on 3.10 does not ignore a failed write of its help text,
 so `--help | head -0` needed its own handling there.
+
+## Licence and maintainer
+
+MIT licence (see `LICENSE`). Maintained by Calas Automations Inc.

@@ -52,7 +52,7 @@ commands; the findings are not an independent second opinion. Python
 | 13 | Kill whole process tree on gate timeout (Windows) | 2 | 2 | 3 | 3 | NOT-DONE (cannot test) |
 | 14 | `py.typed` + typed public API | 2 | 1 | 4 | 2 | NOT-DONE (no library API promised) |
 | 15 | Python 3.14 classifier + CI | 2 | 1 | 1 | 2 | NOT-DONE (3.14 not available here) |
-| 16 | Trusted Publishing workflow (PyPI, no token) | 4 | 3 | 2 | 3 | NOT-DONE (needs Dan's PyPI setup; never publish from here) |
+| 16 | Trusted Publishing workflow (PyPI, no token) | 4 | 3 | 2 | 3 | NOT-DONE (needs the owner's PyPI setup; never publish from here) |
 | 17 | Faster test suite (share one fixture repo) | 3 | 1 | 4 | 2 | NOT-DONE |
 | 18 | Go / Rust / PHP import graph | 4 | 4 | 5 | 3 | NOT-DONE (earlier "not built") |
 | 19 | Multi-line rule matching (`eval` split by backslash) | 3 | 3 | 5 | 3 | NOT-DONE (earlier "not built") |

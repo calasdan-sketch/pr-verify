@@ -2,6 +2,36 @@
 
 ## 0.3.0 (unreleased)
 
+Round 5: gates, GitHub bots, author line (details: `docs/ROUND5.md`).
+
+Fixed
+
+- A gate that printed a lot filled memory (400 MB of output made pr-verify
+  use 1.16 GB); only the last 64 KB is kept now (17 MB for the same run).
+- A timed-out gate left the processes it had started running; on POSIX the
+  whole process group is killed (Windows: `taskkill /T`, not run). A gate
+  no longer reads the caller's standard input.
+- A commit from a GitHub App whose display name looks like a person
+  ("Devin AI", address `ID+devin-ai-integration[bot]@users.noreply.github.com`)
+  counted as human; the `[bot]` noreply address now always marks an agent.
+
+Changed (behaviour)
+
+- Gates no longer inherit environment variables whose names look like
+  secrets (TOKEN, SECRET, PASSWORD, CREDENTIAL, API_KEY, `_KEY`, AUTH ...).
+  A gate that needs one lists it under the new `gate_env_pass:` setting.
+  stdout and stderr of a gate are now merged in the order written.
+- Author and maintainer are "Calas Automations Inc." everywhere (package
+  metadata, `__author__`, `--help`, SARIF `organization`, README). The test
+  fixtures use a made-up committer instead of a real person's name.
+- README: the Action example sets `persist-credentials: false`.
+
+Added
+
+- Golden-file tests for the human, JSON, Markdown and SARIF reports;
+  seeded property tests; a PyYAML differential test for the config reader
+  (skipped when PyYAML is absent); `benchmarks/mutation_sanity.py`.
+
 Round 4: the stranger's first hour (built wheel installed in a fresh
 environment, README commands run from it). Details: `docs/ROUND4.md`.
 

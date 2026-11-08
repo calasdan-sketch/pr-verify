@@ -397,7 +397,7 @@ class TestEndToEnd(unittest.TestCase):
 
     def test_hidden_character_in_a_human_line_is_found_too(self):
         tmp, base = make_pr_repo()
-        commit_as(tmp, "Dan Calas", "dan@example.com", "human",
+        commit_as(tmp, "Alex Dev", "alex@example.com", "human",
                   {"app/z.py": "ok = 'a" + BIDI + "b'\n"})
         code, out, _ = run(["--root", tmp, "check", "--base", base, "--format", "json"])
         data = json.loads(out)
@@ -406,7 +406,7 @@ class TestEndToEnd(unittest.TestCase):
 
     def test_terminal_output_escapes_the_bidi_character(self):
         tmp, base = make_pr_repo()
-        commit_as(tmp, "Dan Calas", "dan@example.com", "human",
+        commit_as(tmp, "Alex Dev", "alex@example.com", "human",
                   {"app/z" + BIDI + ".py": "ok = 1\n"})
         code, out, _ = run(["--root", tmp, "check", "--base", base])
         self.assertNotIn(BIDI, out)

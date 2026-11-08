@@ -62,6 +62,10 @@ DEFAULTS = {
     # executables with arguments — no pipes, redirects, or $VARs.
     "gates": [],
     # "gates": ["python -m pytest -x -q"],
+    # A gate runs the pull request's code, so it does not inherit environment
+    # variables whose names look like secrets (TOKEN, SECRET, PASSWORD, KEY,
+    # AUTH ...). List here the names a gate really needs, e.g. [NPM_TOKEN].
+    "gate_env_pass": [],
     # Added to agent_markers / sensitive_paths instead of replacing them: the
     # way to add your own bot or your own sensitive folder and keep every
     # default (a list under agent_markers drops them, Claude Code's address
@@ -130,7 +134,7 @@ def _read_base_config(root: str, base: str) -> dict:
 _INT_FIELDS = {"risk_threshold": (0, 100), "timeout": (1, None)}
 _LIST_FIELDS = ("agent_markers", "sensitive_paths", "gates",
                 "extra_agent_markers", "extra_sensitive_paths",
-                "risk_class_ignore_paths", "risk_class_off")
+                "risk_class_ignore_paths", "risk_class_off", "gate_env_pass")
 
 
 def _as_gate(g) -> str | list[str]:
@@ -289,6 +293,11 @@ def example_config() -> str:
         "#   gates:",
         '#     - "python -m pytest -x -q"',
         *_yaml_list("gates", DEFAULTS["gates"]),
+        "",
+        "# A gate runs the pull request's code, so it does not get environment",
+        "# variables whose names look like secrets (TOKEN, SECRET, PASSWORD, KEY,",
+        "# AUTH ...). Name the ones a gate really needs, e.g. [NPM_TOKEN].",
+        *_yaml_list("gate_env_pass", DEFAULTS["gate_env_pass"]),
         "",
         "# Files the risk-class scan skips (vendored or generated code), and",
         "# classes it should not report (see the README for their names).",

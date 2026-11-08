@@ -81,14 +81,14 @@ def make_greek_repo() -> tuple[str, str]:
     with the bug its hunks landed on editor.py."""
     tmp = tempfile.mkdtemp()
     git(tmp, "init", "-qb", "main")
-    commit_as(tmp, "Dan Calas", "dan@example.com", "base",
+    commit_as(tmp, "Alex Dev", "alex@example.com", "base",
               {"app/core.py": "def calc(x):\n    return x\n"})
     base = _sha(tmp)
     commit_as(tmp, "Tim Abbott", "tim.abbott@example.com", "Add Greek module",
               {"app/core.py": "def calc(x):\n    return x\n\n\n"
                               "def more():\n    return 1\n",
                GREEK: "A = 1\nB = 2\nC = 3\n"})
-    commit_as(tmp, "Dan Calas", "dan@example.com", "Fix cursor jump in editor",
+    commit_as(tmp, "Alex Dev", "alex@example.com", "Fix cursor jump in editor",
               {"app/editor.py": "x = 1\n"})
     return tmp, base
 
@@ -147,7 +147,7 @@ class TestMarkerMatching(unittest.TestCase):
         self.assertIsNone(self.m("Tim Abbott", "tim.abbott@example.com", "x"))
         self.assertIsNone(self.m("Claude Dupont", "claude.dupont@acme.fr", "x"))
         self.assertIsNone(self.m("Cody Smith", "cody.smith@example.com", "x"))
-        self.assertIsNone(self.m("Dan Calas", "dan@example.com",
+        self.assertIsNone(self.m("Alex Dev", "alex@example.com",
                                  "Fix cursor jump in editor",
                                  "The copilot docs mention claude and codex."))
         self.assertIsNone(self.m("Robot Ross", "ross@example.com", "x"))
@@ -158,15 +158,15 @@ class TestMarkerMatching(unittest.TestCase):
         self.assertEqual(self.m("Claude", "noreply@anthropic.com"), "claude")
         self.assertEqual(self.m("dependabot[bot]", "x@github.com"), "bot")
         self.assertEqual(self.m("copilot-swe-agent[bot]", "x@github.com"), "copilot")
-        self.assertEqual(self.m("Dan Calas (aider)", "dan@example.com"), "aider")
-        self.assertEqual(self.m("Dan Calas", "dan@example.com", "aider: fix tests"),
+        self.assertEqual(self.m("Alex Dev (aider)", "alex@example.com"), "aider")
+        self.assertEqual(self.m("Alex Dev", "alex@example.com", "aider: fix tests"),
                          "aider")
-        self.assertEqual(self.m("Dan Calas", "cursoragent@cursor.com"), "cursor")
-        self.assertEqual(self.m("Dan", "dan@example.com", "Add feature",
+        self.assertEqual(self.m("Alex Dev", "cursoragent@cursor.com"), "cursor")
+        self.assertEqual(self.m("Alex", "alex@example.com", "Add feature",
                                 "Co-Authored-By: Claude <noreply@anthropic.com>"),
                          "claude")
-        self.assertEqual(self.m("Dan", "dan@example.com", "x",
-                                "Signed-off-by: Dan\nCo-authored-by: Copilot "
+        self.assertEqual(self.m("Alex", "alex@example.com", "x",
+                                "Signed-off-by: Alex\nCo-authored-by: Copilot "
                                 "<223556219+Copilot@users.noreply.github.com>"),
                          "copilot")
         self.assertEqual(self.m("Claude Code", "x@example.com"), "claude code")
@@ -182,7 +182,7 @@ class TestMarkerMatching(unittest.TestCase):
     def test_legacy_trailer_marker_only_matches_trailers(self):
         mk = ["co-authored-by: claude"]
         self.assertIsNone(self.m("Claude", "c@example.com", "x", "", mk))
-        self.assertEqual(self.m("Dan", "d@example.com", "x",
+        self.assertEqual(self.m("Alex", "d@example.com", "x",
                                 "Co-Authored-By: Claude <n@a.com>", mk),
                          "co-authored-by: claude")
 
@@ -239,7 +239,7 @@ class TestGateVerdictLine(unittest.TestCase):
 def make_master_repo() -> str:
     tmp = tempfile.mkdtemp()
     git(tmp, "init", "-qb", "master")
-    commit_as(tmp, "Dan Calas", "dan@example.com", "base",
+    commit_as(tmp, "Alex Dev", "alex@example.com", "base",
               {"app/core.py": "def calc(x):\n    return x\n"})
     git(tmp, "checkout", "-qb", "feature")
     commit_as(tmp, "claude-bot", "claude-bot@example.com", "feat",
@@ -289,7 +289,7 @@ class TestBaseDetection(unittest.TestCase):
     def test_nothing_detectable_is_a_clean_error(self):
         tmp = tempfile.mkdtemp()
         git(tmp, "init", "-qb", "trunk")
-        commit_as(tmp, "Dan", "d@example.com", "base", {"a.py": "x = 1\n"})
+        commit_as(tmp, "Alex", "d@example.com", "base", {"a.py": "x = 1\n"})
         err = io.StringIO()
         with redirect_stdout(io.StringIO()), redirect_stderr(err):
             code = cli_mod.main(["--root", tmp, "check"])
@@ -595,7 +595,7 @@ class TestSimplifications(unittest.TestCase):
         self.assertEqual(calls[0][:2], ("show", "-s"))
         self.assertEqual(set(texts), shas)
         names = {t[0] for t in texts.values()}
-        self.assertEqual(names, {"Dan Calas", "claude-bot"})
+        self.assertEqual(names, {"Alex Dev", "claude-bot"})
         bodies = [t[3] for t in texts.values() if "Co-authored-by" in t[3]]
         self.assertEqual(len(bodies), 1)
 

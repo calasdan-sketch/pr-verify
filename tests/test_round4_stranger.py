@@ -5,7 +5,6 @@ import json
 import os
 import re
 import subprocess
-import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -13,7 +12,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from fixture import PY, commit_as, git
 
 import pr_verify
-from pr_verify import cli, sarif, textsafe
+from pr_verify import cli, textsafe
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -34,7 +33,7 @@ class TestNonUtf8FileName(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         git(self.tmp, "init", "-qb", "main")
-        commit_as(self.tmp, "Dan", "d@example.com", "base", {"a.py": "x = 1\n"})
+        commit_as(self.tmp, "Alex", "d@example.com", "base", {"a.py": "x = 1\n"})
         with open(os.path.join(self.tmp, os.fsdecode(b"caf\xe9.py")), "w") as f:
             f.write("import os\nos.system(input())\n")
         git(self.tmp, "add", "-A")
@@ -102,8 +101,8 @@ class TestRootAfterSubcommand(unittest.TestCase):
     def test_root_works_after_the_subcommand(self):
         tmp = tempfile.mkdtemp()
         git(tmp, "init", "-qb", "main")
-        commit_as(tmp, "Dan", "d@example.com", "base", {"a.py": "x = 1\n"})
-        commit_as(tmp, "Dan", "d@example.com", "two", {"a.py": "x = 2\n"})
+        commit_as(tmp, "Alex", "d@example.com", "base", {"a.py": "x = 1\n"})
+        commit_as(tmp, "Alex", "d@example.com", "two", {"a.py": "x = 2\n"})
         a = run(["--root", tmp, "check", "--base", "HEAD~1", "--format", "json"])
         b = run(["check", "--root", tmp, "--base", "HEAD~1", "--format", "json"])
         self.assertEqual(a[0], 0)

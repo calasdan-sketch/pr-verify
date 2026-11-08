@@ -1,0 +1,170 @@
+{
+  "tool": "pr-verify",
+  "version": "0.3.0",
+  "base": "<sha40>",
+  "merge_base": "<sha40>",
+  "base_detected": false,
+  "head": "HEAD",
+  "min_score": 70,
+  "notes": [],
+  "untracked_skipped": [],
+  "risk": {
+    "score": 57,
+    "band": "medium",
+    "factors": {
+      "agent_share": {
+        "points": 28,
+        "detail": "9/13 added lines agent-authored (69%)"
+      },
+      "blast": {
+        "points": 4,
+        "detail": "largest blast radius: 1 downstream dependent(s)"
+      },
+      "sensitive": {
+        "points": 20,
+        "detail": "sensitive files touched: app/auth.py"
+      },
+      "gates": {
+        "points": 0,
+        "detail": "no gates configured"
+      },
+      "no_tests": {
+        "points": 5,
+        "detail": "source changed with no test changes"
+      },
+      "deletion": {
+        "points": 0,
+        "detail": "no agent-attributed deletions"
+      },
+      "risk_classes": {
+        "points": 0,
+        "detail": "no risk class found in the changed lines"
+      }
+    },
+    "requires_review": false
+  },
+  "files": {
+    "app/auth.py": {
+      "added": 4,
+      "agent_added": 4,
+      "removed": 0,
+      "agent_removed": 0,
+      "label": "agent",
+      "agents": [
+        "claude-bot (claude)"
+      ],
+      "deleted": false,
+      "deleted_by": [],
+      "agent_lines": [
+        3,
+        4,
+        5,
+        6
+      ]
+    },
+    "app/core.py": {
+      "added": 8,
+      "agent_added": 4,
+      "removed": 0,
+      "agent_removed": 0,
+      "label": "mixed",
+      "agents": [
+        "claude-bot (claude)"
+      ],
+      "deleted": false,
+      "deleted_by": [],
+      "agent_lines": [
+        7,
+        8,
+        9,
+        10
+      ]
+    },
+    "app/views.py": {
+      "added": 1,
+      "agent_added": 1,
+      "removed": 0,
+      "agent_removed": 0,
+      "label": "agent",
+      "agents": [
+        "claude-bot (claude)"
+      ],
+      "deleted": false,
+      "deleted_by": [],
+      "agent_lines": [
+        1
+      ]
+    }
+  },
+  "blast_radius": {
+    "app/auth.py": {
+      "direct": [],
+      "transitive": [],
+      "external_only": false,
+      "scan": "graph"
+    },
+    "app/core.py": {
+      "direct": [
+        "app/views.py"
+      ],
+      "transitive": [
+        "app/views.py"
+      ],
+      "external_only": false,
+      "scan": "graph"
+    },
+    "app/views.py": {
+      "direct": [],
+      "transitive": [],
+      "external_only": false,
+      "scan": "graph"
+    }
+  },
+  "gates": [],
+  "risk_classes": {
+    "findings": [],
+    "left_out": 0
+  },
+  "policy": {
+    "violations": []
+  },
+  "review_plan": {
+    "depth": "standard",
+    "suggested_reviewers": 1,
+    "code_owners": {},
+    "codeowners_file": null,
+    "risky_files_without_owner": [],
+    "focus": [
+      {
+        "file": "app/core.py",
+        "lines": [
+          7,
+          10
+        ],
+        "kind": "agent_written",
+        "severity": "info",
+        "why": "4 line(s) written by an agent; 1 dependent(s)"
+      },
+      {
+        "file": "app/auth.py",
+        "lines": [
+          3,
+          6
+        ],
+        "kind": "agent_written",
+        "severity": "info",
+        "why": "4 line(s) written by an agent"
+      },
+      {
+        "file": "app/views.py",
+        "lines": [
+          1,
+          1
+        ],
+        "kind": "agent_written",
+        "severity": "info",
+        "why": "1 line(s) written by an agent"
+      }
+    ]
+  }
+}

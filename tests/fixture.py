@@ -92,7 +92,7 @@ def make_deletion_repo() -> tuple[str, str]:
     Then one agent commit deletes app/util.py."""
     tmp = tempfile.mkdtemp()
     git(tmp, "init", "-qb", "main")
-    commit_as(tmp, "Dan Calas", "dan@example.com", "base",
+    commit_as(tmp, "Alex Dev", "alex@example.com", "base",
               {"app/util.py": "def helper():\n    return 42\n",
                "app/main.py": "from app.util import helper\n\n\n"
                               "def main():\n    return helper()\n"})
@@ -115,7 +115,7 @@ def make_sensitive_deletion_repo() -> tuple[str, str]:
     + no_tests (5) = 70, tripping the default HIGH threshold."""
     tmp = tempfile.mkdtemp()
     git(tmp, "init", "-qb", "main")
-    commit_as(tmp, "Dan Calas", "dan@example.com", "base",
+    commit_as(tmp, "Alex Dev", "alex@example.com", "base",
               {"app/auth.py": "def login(u, p):\n    return True\n",
                "app/main.py": "def main():\n    return 0\n"})
     base = subprocess.run(["git", "-C", tmp, "rev-parse", "HEAD"],
@@ -138,7 +138,7 @@ def commit_at_new_base(tmp: str, old_base: str, files: dict[str, str],
     base is diff-equivalent to old_base for everything committed later.
     """
     git(tmp, "checkout", "-q", old_base)
-    commit_as(tmp, "Dan Calas", "dan@example.com", message, files)
+    commit_as(tmp, "Alex Dev", "alex@example.com", message, files)
     new_base = subprocess.run(["git", "-C", tmp, "rev-parse", "HEAD"],
                               capture_output=True, text=True, encoding="utf-8",
                               check=True).stdout.strip()
@@ -151,7 +151,7 @@ def make_pr_repo() -> tuple[str, str]:
     + one agent commit on top."""
     tmp = tempfile.mkdtemp()
     git(tmp, "init", "-qb", "main")
-    commit_as(tmp, "Dan Calas", "dan@example.com", "base",
+    commit_as(tmp, "Alex Dev", "alex@example.com", "base",
               {"app/core.py": "def calc(x):\n    return x * 2\n",
                "app/auth.py": "def login(u, p):\n    return True\n",
                "tests/test_core.py": "def test_calc():\n    assert True\n"})
@@ -159,7 +159,7 @@ def make_pr_repo() -> tuple[str, str]:
                           capture_output=True, text=True, encoding="utf-8",
                           check=True).stdout.strip()
     # human follow-up: touches core
-    commit_as(tmp, "Dan Calas", "dan@example.com", "tweak calc",
+    commit_as(tmp, "Alex Dev", "alex@example.com", "tweak calc",
               {"app/core.py": "def calc(x):\n    return x * 2\n\n\n"
                               "def double(x):\n    return x + x\n"})
     # agent commit: new feature in core + touches auth (sensitive)
@@ -189,7 +189,7 @@ def make_src_layout_repo() -> tuple[str, str]:
     Then one agent commit edits src/pkg/core.py (no test change)."""
     tmp = tempfile.mkdtemp()
     git(tmp, "init", "-qb", "main")
-    commit_as(tmp, "Dan Calas", "dan@example.com", "base", {
+    commit_as(tmp, "Alex Dev", "alex@example.com", "base", {
         "src/pkg/__init__.py": "",
         "src/pkg/core.py": "def calc(x):\n    return x * 2\n",
         "src/pkg/api.py": "from pkg.core import calc\n\n\n"

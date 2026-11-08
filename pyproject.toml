@@ -9,6 +9,7 @@ description = "Deterministic trust scoring for agent-authored PRs."
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "Calas Automations Inc." }]
+maintainers = [{ name = "Calas Automations Inc." }]
 license = "MIT"
 license-files = ["LICENSE"]
 keywords = [

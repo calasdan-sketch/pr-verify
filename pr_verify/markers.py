@@ -12,13 +12,15 @@ on whole words and only where an agent actually leaves its name:
    A human-shaped name (two or more space-separated words) only matches a
    marker that covers the WHOLE name (`Claude Code` ~ marker "claude
    code") or a bracketed/parenthesised tag anywhere in it
-   (`dependabot[bot]`, `Dan Calas (aider)`). So "Claude Dupont",
+   (`dependabot[bot]`, `Alex Dev (aider)`). So "Claude Dupont",
    "Cody Smith" and "Tim Abbott" are humans; the marker "bot" matches the
    word "bot", never "Abbott".
 2. Author email: a marker equal to the whole local part (`cody@...`), to a
    hyphen/underscore-separated word of it (`claude-bot@...`,
    `cursor_agent@...`; dots join human first.last names and are not
    split), or to a domain label (`...@aider.chat`, `...@cursor.com`).
+   GitHub's noreply address of an app account, `ID+name[bot]@users.noreply.
+   github.com`, is a bot whatever the display name says ("Devin AI").
 3. Trailers in the body -- `Co-Authored-By:`, `Co-authored-by:`,
    `Generated-by:`, `Signed-off-by:` -- have their name and email parts
    matched with rules 1 and 2 (`Co-Authored-By: Claude
@@ -126,6 +128,15 @@ def email_matches(email: str, marker: str, local_part: bool = True) -> bool:
     if "@" in marker:
         return email.strip().lower() == marker.strip().lower()
     local, _, domain = email.strip().lower().rpartition("@")
+    # GitHub's own noreply address of an app account, `ID+name[bot]@users.
+    # noreply.github.com`, says the account is a bot whatever display name
+    # the commit carries ("Devin AI" is two words, so it reads as a person).
+    # The [bot] suffix exists only on GitHub App accounts.
+    github_bot = domain == "users.noreply.github.com" and local.endswith("[bot]")
+    if github_bot:
+        local_part = True
+        if mw == ["bot"]:
+            return True
     # The local part (cody@, claude-bot@) is a bot's handle; a person called
     # "Cody Smith" with the address cody@ is still a person. The domain
     # (@cursor.com, @aider.chat) is checked either way.
